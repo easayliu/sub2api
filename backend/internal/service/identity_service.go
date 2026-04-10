@@ -25,14 +25,15 @@ var (
 )
 
 // 默认指纹值（当客户端未提供时使用）
+// Aligned with claude-cli/2.1.100 captured traffic.
 var defaultFingerprint = Fingerprint{
-	UserAgent:               "claude-cli/2.1.22 (external, cli)",
+	UserAgent:               "claude-cli/2.1.100 (external, cli)",
 	StainlessLang:           "js",
-	StainlessPackageVersion: "0.70.0",
-	StainlessOS:             "Linux",
+	StainlessPackageVersion: "0.81.0",
+	StainlessOS:             "MacOS",
 	StainlessArch:           "arm64",
 	StainlessRuntime:        "node",
-	StainlessRuntimeVersion: "v24.13.0",
+	StainlessRuntimeVersion: "v24.3.0",
 }
 
 // Fingerprint represents account fingerprint data
@@ -122,8 +123,14 @@ func (s *IdentityService) GetOrCreateFingerprint(ctx context.Context, accountID 
 func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fingerprint {
 	fp := &Fingerprint{}
 
-	// 获取User-Agent
-	if ua := headers.Get("User-Agent"); ua != "" {
+	// 仅当客户端 User-Agent 形如 "claude-cli/X.Y.Z" 时才采用，否则用 defaultFingerprint 兜底。
+	// 原因：mimic 路径下客户端 UA 可能是 PostmanRuntime / okhttp / LobeChat 等任意值，
+	// 直接写入指纹缓存会导致：
+	//   1. ExtractCLIVersion(fp.UserAgent) 返回 "" → metadata.user_id 退化为 legacy 拼接格式
+	//      （真实 claude-cli/2.1.78+ 已使用 JSON 格式，legacy 是明显的第三方信号）。
+	//   2. syncBillingHeaderVersion 拿不到版本号 → cc_version 同步永远是 no-op。
+	// 通过 default 兜底使账号级 fp.UserAgent 始终是合法的 claude-cli 字符串。
+	if ua := headers.Get("User-Agent"); ua != "" && claudeCodeUAPattern.MatchString(ua) {
 		fp.UserAgent = ua
 	} else {
 		fp.UserAgent = defaultFingerprint.UserAgent
@@ -240,15 +247,26 @@ func (s *IdentityService) RewriteUserID(body []byte, accountID int64, accountUUI
 		return body, nil
 	}
 
-	sessionTail := parsed.SessionID // 原始session UUID
-
-	// 生成新的session hash: SHA256(accountID::sessionTail) -> UUID格式
-	seed := fmt.Sprintf("%d::%s", accountID, sessionTail)
-	newSessionHash := generateUUIDFromSeed(seed)
+	// session_id 保留客户端原值，不再派生。
+	//
+	// 原因:
+	//   1. 账号隔离已经通过 device_id (= cachedClientID, 账号级随机指纹) 和
+	//      account_uuid (= 账号自身 UUID) 完成；session_id 派生是冗余设计。
+	//   2. 派生后的 session_id 不在 CLI 颁发的合法 session token 范围内，
+	//      与 X-Claude-Code-Session-Id header 中的客户端原值天然不一致；
+	//      新版本 claude-cli (2.1.100+) 抓包显示 header 与 metadata.user_id.session_id
+	//      在客户端侧总是相等的，派生破坏了这个不变量。
+	//   3. 即使 Anthropic 不强制 header == body，让两者一致更接近真实 CLI 行为，
+	//      减少潜在指纹差异。
+	//
+	// 注: SessionIDMaskingEnabled 启用时，session_id 会在
+	// RewriteUserIDWithMasking 第二阶段被替换为固定的 maskedSessionID，
+	// 该机制独立于此处的"派生 / 不派生"决策。
+	sessionID := parsed.SessionID
 
 	// 根据客户端版本选择输出格式
 	version := ExtractCLIVersion(fingerprintUA)
-	newUserID := FormatMetadataUserID(cachedClientID, accountUUID, newSessionHash, version)
+	newUserID := FormatMetadataUserID(cachedClientID, accountUUID, sessionID, version)
 	if newUserID == userID {
 		return body, nil
 	}
@@ -368,19 +386,6 @@ func generateClientID() string {
 		return hex.EncodeToString(h[:])
 	}
 	return hex.EncodeToString(b)
-}
-
-// generateUUIDFromSeed 从种子生成确定性UUID v4格式字符串
-func generateUUIDFromSeed(seed string) string {
-	hash := sha256.Sum256([]byte(seed))
-	bytes := hash[:16]
-
-	// 设置UUID v4版本和变体位
-	bytes[6] = (bytes[6] & 0x0f) | 0x40
-	bytes[8] = (bytes[8] & 0x3f) | 0x80
-
-	return fmt.Sprintf("%x-%x-%x-%x-%x",
-		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
 }
 
 // parseUserAgentVersion 解析user-agent版本号

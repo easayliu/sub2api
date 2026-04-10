@@ -368,6 +368,30 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			wantFirstMsgText: "[System Instructions]\nBe helpful",
 			wantAckMsgText:   "Understood. I will follow these instructions.",
 		},
+		// Regression: leading-whitespace + CC prefix + extra instructions used to
+		// trigger an internal hasClaudeCodePrefix short-circuit that silently
+		// dropped the user's extra instructions. The fix removes the inner check
+		// so the entire trimmed text gets migrated into messages.
+		{
+			name:             "leading whitespace + CC prefix + extra instructions migrates to messages",
+			body:             `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:           "  You are Claude Code, Anthropic's official CLI for Claude. Always respond in French.",
+			wantSystemText:   claudeCodeSystemPrompt,
+			wantMessagesLen:  3, // instruction + ack + original
+			wantFirstMsgRole: "user",
+			wantFirstMsgText: "[System Instructions]\nYou are Claude Code, Anthropic's official CLI for Claude. Always respond in French.",
+			wantAckMsgText:   "Understood. I will follow these instructions.",
+		},
+		// Edge case: leading whitespace + system text equal to the bare banner
+		// must NOT inject (would be noise: "Understood..." with no real instruction).
+		// Pinned to verify the `!= ccPromptTrimmed` guard is still effective.
+		{
+			name:            "leading whitespace + bare banner only - no messages injected",
+			body:            `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:          "  " + claudeCodeSystemPrompt + "  ",
+			wantSystemText:  claudeCodeSystemPrompt,
+			wantMessagesLen: 1,
+		},
 	}
 
 	for _, tt := range tests {

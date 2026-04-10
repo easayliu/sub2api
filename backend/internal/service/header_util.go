@@ -9,7 +9,8 @@ import (
 // Go 的 HTTP server 解析请求时会将所有 header key 转为 Canonical 形式（如 x-app → X-App），
 // 此 map 用于在转发时恢复到真实的 wire format。
 //
-// 来源：对真实 Claude CLI (claude-cli/2.1.81) 到 api.anthropic.com 的 HTTPS 流量抓包。
+// 来源：对真实 Claude CLI (claude-cli/2.1.100) 到 api.anthropic.com 的 HTTPS 流量抓包。
+// 注意：claude-cli/2.1.100 已不再发送 x-stainless-helper-method header。
 var headerWireCasing = map[string]string{
 	// Title case
 	"accept":     "Accept",
@@ -24,7 +25,6 @@ var headerWireCasing = map[string]string{
 	"x-stainless-arch":            "X-Stainless-Arch",
 	"x-stainless-runtime":         "X-Stainless-Runtime",
 	"x-stainless-runtime-version": "X-Stainless-Runtime-Version",
-	"x-stainless-helper-method":   "x-stainless-helper-method",
 
 	// Anthropic SDK 自身设置的 header，全小写
 	"anthropic-dangerous-direct-browser-access": "anthropic-dangerous-direct-browser-access",
@@ -68,7 +68,6 @@ var headerWireOrder = []string{
 	"sec-fetch-mode",
 	"accept-encoding",
 	"content-length",
-	"x-stainless-helper-method",
 }
 
 // headerWireOrderSet 用于快速判断某个 key 是否在 headerWireOrder 中（按 lowercase 匹配）。

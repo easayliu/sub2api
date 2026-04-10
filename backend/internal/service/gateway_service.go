@@ -268,7 +268,6 @@ func buildClaudeMimicDebugLine(req *http.Request, body []byte, account *Account,
 		"x-api-key",
 		"content-type",
 		"accept",
-		"x-stainless-helper-method",
 	}
 
 	h := make([]string, 0, len(interesting))
@@ -349,6 +348,7 @@ var ErrNoAvailableAccounts = errors.New("no available accounts")
 var ErrClaudeCodeOnly = errors.New("this group only allows Claude Code clients")
 
 // allowedHeaders 白名单headers（参考CRS项目）
+// 注意：claude-cli/2.1.100 已不再发送 x-stainless-helper-method，故从白名单中移除。
 var allowedHeaders = map[string]bool{
 	"accept":                                    true,
 	"x-stainless-retry-count":                   true,
@@ -359,7 +359,6 @@ var allowedHeaders = map[string]bool{
 	"x-stainless-arch":                          true,
 	"x-stainless-runtime":                       true,
 	"x-stainless-runtime-version":               true,
-	"x-stainless-helper-method":                 true,
 	"anthropic-dangerous-direct-browser-access": true,
 	"anthropic-version":                         true,
 	"x-app":                                     true,
@@ -1079,18 +1078,10 @@ func normalizeClaudeOAuthRequestBody(body []byte, modelID string, opts claudeOAu
 		}
 	}
 
-	if gjson.GetBytes(out, "temperature").Exists() {
-		if next, ok := deleteJSONPathBytes(out, "temperature"); ok {
-			out = next
-			modified = true
-		}
-	}
-	if gjson.GetBytes(out, "tool_choice").Exists() {
-		if next, ok := deleteJSONPathBytes(out, "tool_choice"); ok {
-			out = next
-			modified = true
-		}
-	}
+	// NOTE: temperature 和 tool_choice 字段在历史版本中曾被删除（来自 opencode 的早期 OAuth workaround）。
+	// 真实 claude-cli/2.1.100 抓包（capture/011）显示 temperature 是合法字段且会被发送，
+	// tool_choice 也是 Anthropic API 文档中允许的字段。删除它们会静默丢失客户端配置，
+	// 因此现在保持透传。
 
 	if !modified {
 		return body, modelID
@@ -3762,8 +3753,26 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 
 	// 3. 将原始 system prompt 作为 user/assistant 消息对注入到 messages 开头
 	//    模型仍通过 messages 接收完整指令，保留客户端功能
+	//
+	// 注意: 不要在此处再次用 hasClaudeCodePrefix 短路。
+	//
+	//   - 外层 Forward() 已经用 systemIncludesClaudeCodePrompt(parsed.System) 过滤掉了
+	//     "原 system 中已含 CC 前缀"的所有情况，正常路径下进入这里时
+	//     originalSystemText 不会以 CC 前缀开头。
+	//
+	//   - 但 Step 1 对 string 类型做了 strings.TrimSpace(v)，而外层
+	//     hasClaudeCodePrefix 直接用未 trim 的 v 调用 strings.HasPrefix。
+	//     当客户端发送形如 "  You are Claude Code, ...请翻译" (带前导空白
+	//     + CC 前缀 + 额外内容) 的 system 时:
+	//       1) 外层用未 trim 的 v 检测 → false → 进入 rewrite
+	//       2) Step 1 trim 后 originalSystemText 以 CC 前缀开头
+	//       3) 内层 hasClaudeCodePrefix(originalSystemText) → true → 错误短路
+	//       4) 用户的"...请翻译"指令被丢弃
+	//
+	//   只保留 ccPromptTrimmed 等值检查即可: 它阻止"原 system 完全等于 banner
+	//   本身"的退化情况注入毫无意义的 user/assistant 对。
 	ccPromptTrimmed := strings.TrimSpace(claudeCodeSystemPrompt)
-	if originalSystemText != "" && originalSystemText != ccPromptTrimmed && !hasClaudeCodePrefix(originalSystemText) {
+	if originalSystemText != "" && originalSystemText != ccPromptTrimmed {
 		instrMsg, err1 := json.Marshal(map[string]any{
 			"role": "user",
 			"content": []map[string]any{
@@ -3804,19 +3813,36 @@ type cacheControlPath struct {
 	log  string
 }
 
+// isGlobalScopeCacheControl reports whether a cache_control block has
+// scope: "global". Global-scope cache blocks are shared across requests
+// under the prompt-caching-scope-2026-01-05 beta and do not count toward
+// the per-request 4-block limit — counting them would evict legitimate
+// per-conversation cache_control entries in long conversations.
+func isGlobalScopeCacheControl(cacheControl gjson.Result) bool {
+	if !cacheControl.Exists() {
+		return false
+	}
+	return cacheControl.Get("scope").String() == "global"
+}
+
 func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, messagePaths []string, systemPaths []string) {
 	system := gjson.GetBytes(body, "system")
 	if system.IsArray() {
 		sysIndex := 0
 		system.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("cache_control").Exists() {
+			cacheControl := item.Get("cache_control")
+			if cacheControl.Exists() {
 				path := fmt.Sprintf("system.%d.cache_control", sysIndex)
-				if item.Get("type").String() == "thinking" {
+				switch {
+				case item.Get("type").String() == "thinking":
 					invalidThinking = append(invalidThinking, cacheControlPath{
 						path: path,
 						log:  "[Warning] Removed illegal cache_control from thinking block in system",
 					})
-				} else {
+				case isGlobalScopeCacheControl(cacheControl):
+					// Skip counting — global scope is shared across requests
+					// and exempt from the per-request limit.
+				default:
 					systemPaths = append(systemPaths, path)
 				}
 			}
@@ -3833,14 +3859,18 @@ func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, 
 			if content.IsArray() {
 				contentIndex := 0
 				content.ForEach(func(_, item gjson.Result) bool {
-					if item.Get("cache_control").Exists() {
+					cacheControl := item.Get("cache_control")
+					if cacheControl.Exists() {
 						path := fmt.Sprintf("messages.%d.content.%d.cache_control", msgIndex, contentIndex)
-						if item.Get("type").String() == "thinking" {
+						switch {
+						case item.Get("type").String() == "thinking":
 							invalidThinking = append(invalidThinking, cacheControlPath{
 								path: path,
 								log:  fmt.Sprintf("[Warning] Removed illegal cache_control from thinking block in messages[%d].content[%d]", msgIndex, contentIndex),
 							})
-						} else {
+						case isGlobalScopeCacheControl(cacheControl):
+							// Skip counting — see isGlobalScopeCacheControl.
+						default:
 							messagePaths = append(messagePaths, path)
 						}
 					}
@@ -5640,7 +5670,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			// 非 Claude Code 客户端：按 opencode 的策略处理：
 			// - 强制 Claude Code 指纹相关请求头（尤其是 user-agent/x-stainless/x-app）
 			// - 保留 incoming beta 的同时，确保 OAuth 所需 beta 存在
-			applyClaudeCodeMimicHeaders(req, reqStream)
+			applyClaudeCodeMimicHeaders(req)
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
 			// Claude Code OAuth credentials are scoped to Claude Code.
@@ -5672,10 +5702,21 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
-	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
+	// X-Claude-Code-Session-Id 处理（仅对 OAuth 账号且 mimic 路径生效）。
+	//
+	// 真实 Claude CLI 始终发送此 header，因此 mimic 路径下缺失它是明显的第三方信号 ——
+	// 我们必须主动注入。注入值取自 body.metadata.user_id.session_id（已被 RewriteUserID
+	// 派生），与 body 内会话标识保持一致。
+	//
+	// 真 CC 客户端路径（!mimicClaudeCode）则**完全不动** header：
+	//   - 客户端原值通过白名单透传到 req.Header，保持透明
+	//   - Anthropic 并不要求 X-Claude-Code-Session-Id 必须等于 metadata.user_id.session_id
+	//     （历史版本 cli 抓包中两者可以不等），所以即使 RewriteUserID 已经改写了 body
+	//     的 session_id，header 也不应该被强制覆盖为派生值 —— 那样会让 header 既不是
+	//     客户端原值，也不是 cli 颁发的合法 session token。
+	if mimicClaudeCode && tokenType == "oauth" {
 		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
-			if parsed := ParseMetadataUserID(uid); parsed != nil {
+			if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != "" {
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
 			}
 		}
@@ -6103,7 +6144,10 @@ var defaultDroppedBetasSet = buildBetaTokenSet(claude.DroppedBetas)
 // applyClaudeCodeMimicHeaders forces "Claude Code-like" request headers.
 // This mirrors opencode-anthropic-auth behavior: do not trust downstream
 // headers when using Claude Code-scoped OAuth credentials.
-func applyClaudeCodeMimicHeaders(req *http.Request, isStream bool) {
+//
+// NOTE: claude-cli/2.1.100 no longer sends x-stainless-helper-method even
+// for streaming requests, so this function intentionally does not set it.
+func applyClaudeCodeMimicHeaders(req *http.Request) {
 	if req == nil {
 		return
 	}
@@ -6119,9 +6163,6 @@ func applyClaudeCodeMimicHeaders(req *http.Request, isStream bool) {
 	}
 	// Real Claude CLI uses Accept: application/json (even for streaming).
 	setHeaderRaw(req.Header, "Accept", "application/json")
-	if isStream {
-		setHeaderRaw(req.Header, "x-stainless-helper-method", "stream")
-	}
 }
 
 func truncateForLog(b []byte, maxBytes int) string {
@@ -8548,7 +8589,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	// OAuth 账号：处理 anthropic-beta header
 	if tokenType == "oauth" {
 		if mimicClaudeCode {
-			applyClaudeCodeMimicHeaders(req, false)
+			applyClaudeCodeMimicHeaders(req)
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
 			requiredBetas := []string{claude.BetaClaudeCode, claude.BetaOAuth, claude.BetaInterleavedThinking, claude.BetaTokenCounting}
@@ -8579,10 +8620,11 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
-	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
+	// X-Claude-Code-Session-Id 处理：mimic 路径主动注入，真 CC 路径完全不动。
+	// 详见 buildUpstreamRequest 中同名分支的注释。
+	if mimicClaudeCode && tokenType == "oauth" {
 		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
-			if parsed := ParseMetadataUserID(uid); parsed != nil {
+			if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != "" {
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
 			}
 		}

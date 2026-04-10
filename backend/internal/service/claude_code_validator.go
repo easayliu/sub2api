@@ -158,6 +158,14 @@ func (v *ClaudeCodeValidator) hasClaudeCodeSystemPrompt(body map[string]any) boo
 			continue
 		}
 
+		// Fast path: claude-cli/2.1.100+ injects an "x-anthropic-billing-header:
+		// cc_version=...; cc_entrypoint=cli; cch=...;" text block that is unique
+		// to the real CLI. Matching the literal prefix skips the expensive Dice
+		// coefficient calculation below.
+		if strings.HasPrefix(text, "x-anthropic-billing-header:") {
+			return true
+		}
+
 		// 计算与所有模板的最佳相似度
 		bestScore := v.bestSimilarityScore(text)
 		if bestScore >= systemPromptThreshold {

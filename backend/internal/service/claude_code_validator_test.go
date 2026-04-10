@@ -57,6 +57,41 @@ func TestClaudeCodeValidator_NonMessagesPathUAOnly(t *testing.T) {
 	require.True(t, ok)
 }
 
+// TestClaudeCodeValidator_BillingHeaderFastPath verifies that the billing
+// header system block emitted by claude-cli/2.1.100+ short-circuits the
+// Dice similarity check. The billing block text alone (without the
+// "You are Claude Code..." banner) should be enough to pass system prompt
+// validation.
+func TestClaudeCodeValidator_BillingHeaderFastPath(t *testing.T) {
+	validator := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+	req.Header.Set("User-Agent", "claude-cli/2.1.100 (external, cli)")
+	req.Header.Set("X-App", "cli")
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	body := map[string]any{
+		"model": "claude-opus-4-6",
+		"system": []any{
+			map[string]any{
+				"type": "text",
+				"text": "x-anthropic-billing-header: cc_version=2.1.100.f22; cc_entrypoint=cli; cch=648b9;",
+			},
+			// Intentionally omit the standard banner to prove the fast path works on its own.
+			map[string]any{
+				"type": "text",
+				"text": "arbitrary user system prompt that would not match Dice threshold",
+			},
+		},
+		"metadata": map[string]any{
+			"user_id": `{"device_id":"00000000000000000000000000000000000000000000000000000000000000ff","account_uuid":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002"}`,
+		},
+	}
+
+	ok := validator.Validate(req, body)
+	require.True(t, ok, "billing header system block should satisfy system prompt check")
+}
+
 func TestExtractVersion(t *testing.T) {
 	v := NewClaudeCodeValidator()
 	tests := []struct {

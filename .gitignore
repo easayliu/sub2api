@@ -133,3 +133,6 @@ frontend/coverage/
 aicodex
 output/
 
+# 本地抓包样本（用于 Claude Code 指纹/beta 对比）
+capture/
+
