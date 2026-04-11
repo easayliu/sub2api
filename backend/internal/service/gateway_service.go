@@ -1195,23 +1195,23 @@ func (s *GatewayService) buildStableConversationSeed(parsed *ParsedRequest, acco
 		var b strings.Builder
 		if parsed.System != nil {
 			if sysText := s.extractTextFromSystem(parsed.System); sysText != "" {
-				b.WriteString(sysText)
+				_, _ = b.WriteString(sysText)
 			}
 		}
-		b.WriteString("|")
+		_, _ = b.WriteString("|")
 		if len(parsed.Messages) > 0 {
 			if m, ok := parsed.Messages[0].(map[string]any); ok {
 				if content, exists := m["content"]; exists {
 					// Anthropic format: messages[0].content (string or array of blocks)
 					if msgText := s.extractTextFromContent(content); msgText != "" {
-						b.WriteString(msgText)
+						_, _ = b.WriteString(msgText)
 					}
 				} else if parts, ok := m["parts"].([]any); ok {
 					// Gemini format: contents[0].parts[].text
 					for _, part := range parts {
 						if partMap, ok := part.(map[string]any); ok {
 							if text, ok := partMap["text"].(string); ok {
-								b.WriteString(text)
+								_, _ = b.WriteString(text)
 							}
 						}
 					}

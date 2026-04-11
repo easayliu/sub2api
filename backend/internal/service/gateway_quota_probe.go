@@ -97,14 +97,21 @@ func isQuotaProbeContext(ctx context.Context) bool {
 }
 
 // getQuotaProbeState returns (and lazily creates) the tracking state for
-// the given account ID.
+// the given account ID. The sync.Map only ever stores *quotaProbeState
+// values, so the type assertions are guaranteed to succeed; the
+// comma-ok form is used to satisfy errcheck.
 func getQuotaProbeState(accountID int64) *quotaProbeState {
 	if v, ok := quotaProbeStore.Load(accountID); ok {
-		return v.(*quotaProbeState)
+		if st, ok := v.(*quotaProbeState); ok {
+			return st
+		}
 	}
 	st := &quotaProbeState{}
 	actual, _ := quotaProbeStore.LoadOrStore(accountID, st)
-	return actual.(*quotaProbeState)
+	if existing, ok := actual.(*quotaProbeState); ok {
+		return existing
+	}
+	return st
 }
 
 // claimQuotaProbeSlot atomically decides whether the caller should fire a
