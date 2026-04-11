@@ -1108,10 +1108,24 @@ func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account
 		userID = generateClientID()
 	}
 
-	sessionHash := s.GenerateSessionHash(parsed)
+	// Derive session_id from a STABLE conversation seed (not GenerateSessionHash).
+	//
+	// Real claude-cli sends a process-scoped session token that stays
+	// constant across every /v1/messages call in one CLI session.
+	// GenerateSessionHash, by contrast, intentionally drifts per turn —
+	// its tests encode that as the desired behaviour because it doubles as
+	// a sticky-session routing key. Using GenerateSessionHash here would
+	// make the upstream metadata.user_id.session_id flip on every turn,
+	// which is a clear "this isn't a real CLI session" signal in
+	// Anthropic's daily batch fingerprinting.
+	//
+	// buildStableConversationSeed returns a hash that stays constant across
+	// turns of one conversation (anchored on cache_control content if
+	// present, otherwise system prompt + first user message), so the
+	// derived session_id matches real-CLI semantics.
+	seed := s.buildStableConversationSeed(parsed, account.ID)
 	sessionID := uuid.NewString()
-	if sessionHash != "" {
-		seed := fmt.Sprintf("%d::%s", account.ID, sessionHash)
+	if seed != "" {
 		sessionID = generateSessionUUID(seed)
 	}
 
@@ -1122,6 +1136,82 @@ func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account
 	}
 	accountUUID := strings.TrimSpace(account.GetExtraString("account_uuid"))
 	return FormatMetadataUserID(userID, accountUUID, sessionID, uaVersion)
+}
+
+// buildStableConversationSeed returns a hash seed that stays constant
+// across all turns of a single conversation, used to derive a stable
+// metadata.user_id.session_id for non-CC clients on the OAuth mimic path.
+//
+// Why a separate function from GenerateSessionHash:
+//
+//	GenerateSessionHash is intentionally per-snapshot (its
+//	TestGenerateSessionHash_GeminiMultiTurnHashNotSticky test makes
+//	this explicit) because it doubles as a sticky-session routing key
+//	for the request lifetime. The upstream session_id that we put into
+//	metadata.user_id needs the opposite property: a single value that
+//	is constant for every turn in one conversation, matching real
+//	claude-cli's process-scoped session token.
+//
+// Hash inputs (in priority order):
+//
+//  1. cache_control: ephemeral content — for clients that mark cacheable
+//     blocks (system prompt + repo context, etc.), this is the most stable
+//     and most discriminating signal.
+//  2. system prompt + first user message text — every subsequent turn
+//     echoes turn 1's first user message in its history array, so hashing
+//     just that anchor stays stable across turns while still
+//     distinguishing different conversations.
+//
+// The seed is namespaced by accountID so different accounts cannot
+// collide on the same conversation. Returns "" when there is nothing to
+// hash; the caller falls back to a random per-request UUID in that case.
+func (s *GatewayService) buildStableConversationSeed(parsed *ParsedRequest, accountID int64) string {
+	if parsed == nil {
+		return ""
+	}
+
+	var keyPart string
+
+	if cacheable := s.extractCacheableContent(parsed); cacheable != "" {
+		keyPart = "cache:" + s.hashContent(cacheable)
+	} else {
+		var b strings.Builder
+		if parsed.System != nil {
+			if sysText := s.extractTextFromSystem(parsed.System); sysText != "" {
+				b.WriteString(sysText)
+			}
+		}
+		b.WriteString("|")
+		if len(parsed.Messages) > 0 {
+			if m, ok := parsed.Messages[0].(map[string]any); ok {
+				if content, exists := m["content"]; exists {
+					// Anthropic format: messages[0].content (string or array of blocks)
+					if msgText := s.extractTextFromContent(content); msgText != "" {
+						b.WriteString(msgText)
+					}
+				} else if parts, ok := m["parts"].([]any); ok {
+					// Gemini format: contents[0].parts[].text
+					for _, part := range parts {
+						if partMap, ok := part.(map[string]any); ok {
+							if text, ok := partMap["text"].(string); ok {
+								b.WriteString(text)
+							}
+						}
+					}
+				}
+			}
+		}
+		// Skip if only the "|" separator was written (no system, no first message).
+		if b.Len() > 1 {
+			keyPart = "first:" + s.hashContent(b.String())
+		}
+	}
+
+	if keyPart == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("%d::%s", accountID, keyPart)
 }
 
 // GenerateSessionUUID creates a deterministic UUID4 from a seed string.
@@ -4104,7 +4194,12 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// startup behaviour (capture/008). This runs in a detached goroutine so
 	// it never blocks the user's real request. Skipped for the probe request
 	// itself (ctx carries the probe marker) to avoid recursion.
-	if account.IsOAuth() && !isQuotaProbeContext(ctx) && claimQuotaProbeSlot(account.ID) {
+	//
+	// The probe relies on the full identity / fingerprint pipeline to look
+	// indistinguishable from a real /v1/messages call, so it is gated on
+	// s.identityService being wired in. Production always sets it; partial
+	// service constructions (e.g. lightweight tests) skip the probe.
+	if s.identityService != nil && account.IsOAuth() && !isQuotaProbeContext(ctx) && claimQuotaProbeSlot(account.ID) {
 		s.launchQuotaProbe(account, token, tokenType, proxyURL, tlsProfile, shouldMimicClaudeCode)
 	}
 
