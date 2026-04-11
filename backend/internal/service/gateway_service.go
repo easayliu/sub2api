@@ -4098,6 +4098,16 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// 调试日志：记录即将转发的账号信息
 	logger.LegacyPrintf("service.gateway", "[Forward] Using account: ID=%d Name=%s Platform=%s Type=%s TLSFingerprint=%v Proxy=%s",
 		account.ID, account.Name, account.Platform, account.Type, tlsProfile, proxyURL)
+
+	// Quota probe scheduler: fire a fixed "quota" probe for OAuth accounts on
+	// first use and once per 5h reset window, mirroring real claude-cli
+	// startup behaviour (capture/008). This runs in a detached goroutine so
+	// it never blocks the user's real request. Skipped for the probe request
+	// itself (ctx carries the probe marker) to avoid recursion.
+	if account.IsOAuth() && !isQuotaProbeContext(ctx) && claimQuotaProbeSlot(account.ID) {
+		s.launchQuotaProbe(account, token, tokenType, proxyURL, tlsProfile, shouldMimicClaudeCode)
+	}
+
 	// Pre-filter: strip empty text blocks (including nested in tool_result) to prevent upstream 400.
 	body = StripEmptyTextBlocks(body)
 
@@ -4142,6 +4152,13 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				},
 			})
 			return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+		}
+
+		// Record the 5h reset header so the next quota probe decision has
+		// an accurate window timestamp. Best-effort and header-only; does
+		// not consume the response body.
+		if account.IsOAuth() && resp != nil {
+			updateQuotaProbeResetFromResponse(account.ID, resp.Header)
 		}
 
 		// 优先检测thinking block签名错误（400）并重试一次
@@ -5673,20 +5690,25 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			applyClaudeCodeMimicHeaders(req)
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
-			// Claude Code OAuth credentials are scoped to Claude Code.
-			// Non-haiku models MUST include claude-code beta for Anthropic to recognize
-			// this as a legitimate Claude Code request; without it, the request is
-			// rejected as third-party ("out of extra usage").
-			// Haiku models are exempt from third-party detection and don't need it.
-			requiredBetas := []string{claude.BetaOAuth, claude.BetaInterleavedThinking}
-			if !strings.Contains(strings.ToLower(modelID), "haiku") {
-				requiredBetas = []string{claude.BetaClaudeCode, claude.BetaOAuth, claude.BetaInterleavedThinking}
-			}
+			// Build the required beta token list dynamically per request type to
+			// mirror real claude-cli/2.1.100 traffic (cap 008/011). This replaces
+			// the old fixed [claude-code?, oauth, interleaved-thinking] list,
+			// which diverged from captures by missing redact-thinking /
+			// context-management / prompt-caching-scope, and missing
+			// advisor-tool + structured-outputs for structured-output requests.
+			requiredBetas := claude.BuildMessageBetaTokens(claude.MessageBetaRequestKind{
+				ModelID:           modelID,
+				HasTools:          bodyHasTools(body),
+				HasStructuredOut:  bodyHasStructuredOutput(body),
+				IsQuotaProbe:      isQuotaProbeContext(ctx),
+				IncludeClaudeCode: true, // preserve non-haiku safety claim
+				IncludeOAuth:      true,
+			})
 			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
 		} else {
 			// Claude Code 客户端：尽量透传原始 header，仅补齐 oauth beta
 			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
-			setHeaderRaw(req.Header, "anthropic-beta", stripBetaTokensWithSet(s.getBetaHeader(modelID, clientBetaHeader), effectiveDropSet))
+			setHeaderRaw(req.Header, "anthropic-beta", stripBetaTokensWithSet(s.getBetaHeader(modelID, clientBetaHeader, body), effectiveDropSet))
 		}
 	} else {
 		// API-key accounts: apply beta policy filter to strip controlled tokens
@@ -5722,6 +5744,16 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
+	// Ensure x-client-request-id is always present on /v1/messages with a
+	// fresh per-request UUID. Real claude-cli/2.1.100 sends a distinct value
+	// on every request (cap 008 and cap 011 differ), and long-term absence
+	// is a stable negative fingerprint on the Anthropic side.
+	//
+	// Behaviour:
+	//   - client-supplied value via pass-through → preserved (real CC path)
+	//   - missing → generated (mimic path, or real CC that somehow dropped it)
+	ensureClientRequestID(req)
+
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
 	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body, map[string]string{
 		"url":                 req.URL.String(),
@@ -5746,7 +5778,10 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 // getBetaHeader 处理anthropic-beta header
 // 对于OAuth账号，需要确保包含oauth-2025-04-20
-func (s *GatewayService) getBetaHeader(modelID string, clientBetaHeader string) string {
+//
+// body 用于在 fallback 路径上探测 request kind (structured output / tools) 以
+// 动态构造 beta token 列表，与 claude-cli 真实流量对齐。
+func (s *GatewayService) getBetaHeader(modelID string, clientBetaHeader string, body []byte) string {
 	// 如果客户端传了anthropic-beta
 	if clientBetaHeader != "" {
 		// 已包含oauth beta则直接返回
@@ -5782,13 +5817,15 @@ func (s *GatewayService) getBetaHeader(modelID string, clientBetaHeader string) 
 		return claude.BetaOAuth + "," + clientBetaHeader
 	}
 
-	// 客户端没传，根据模型生成
-	// haiku 模型不需要 claude-code beta
-	if strings.Contains(strings.ToLower(modelID), "haiku") {
-		return claude.HaikuBetaHeader
-	}
-
-	return claude.DefaultBetaHeader
+	// 客户端没传：按请求类型动态生成，保持与 claude-cli 真实流量一致。
+	tokens := claude.BuildMessageBetaTokens(claude.MessageBetaRequestKind{
+		ModelID:           modelID,
+		HasTools:          bodyHasTools(body),
+		HasStructuredOut:  bodyHasStructuredOutput(body),
+		IncludeClaudeCode: true,
+		IncludeOAuth:      true,
+	})
+	return strings.Join(tokens, ",")
 }
 
 func requestNeedsBetaFeatures(body []byte) bool {
@@ -5801,6 +5838,26 @@ func requestNeedsBetaFeatures(body []byte) bool {
 		return true
 	}
 	return false
+}
+
+// bodyHasTools reports whether the request body carries a non-empty tools array.
+// Used to classify the request kind for dynamic anthropic-beta token selection.
+func bodyHasTools(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	tools := gjson.GetBytes(body, "tools")
+	return tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
+}
+
+// bodyHasStructuredOutput reports whether the request body carries an
+// output_config.format block. Real claude-cli traffic (cap 011) emits
+// advisor-tool + structured-outputs betas only when this block is present.
+func bodyHasStructuredOutput(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	return gjson.GetBytes(body, "output_config.format").Exists()
 }
 
 func defaultAPIKeyBetaHeader(body []byte) string {
@@ -8592,14 +8649,35 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 			applyClaudeCodeMimicHeaders(req)
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
-			requiredBetas := []string{claude.BetaClaudeCode, claude.BetaOAuth, claude.BetaInterleavedThinking, claude.BetaTokenCounting}
+			// Same dynamic builder as /v1/messages, with token-counting beta
+			// appended to match the count_tokens endpoint requirement.
+			requiredBetas := claude.BuildMessageBetaTokens(claude.MessageBetaRequestKind{
+				ModelID:            modelID,
+				HasTools:           bodyHasTools(body),
+				HasStructuredOut:   bodyHasStructuredOutput(body),
+				IsCountTokens:      true,
+				IncludeClaudeCode:  true,
+				IncludeOAuth:       true,
+				IncludeTokenCounts: true,
+			})
 			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, ctEffectiveDropSet))
 		} else {
 			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
 			if clientBetaHeader == "" {
-				setHeaderRaw(req.Header, "anthropic-beta", claude.CountTokensBetaHeader)
+				// Fallback to dynamic builder so count_tokens also tracks
+				// structured-output / tool-use variations.
+				tokens := claude.BuildMessageBetaTokens(claude.MessageBetaRequestKind{
+					ModelID:            modelID,
+					HasTools:           bodyHasTools(body),
+					HasStructuredOut:   bodyHasStructuredOutput(body),
+					IsCountTokens:      true,
+					IncludeClaudeCode:  true,
+					IncludeOAuth:       true,
+					IncludeTokenCounts: true,
+				})
+				setHeaderRaw(req.Header, "anthropic-beta", strings.Join(tokens, ","))
 			} else {
-				beta := s.getBetaHeader(modelID, clientBetaHeader)
+				beta := s.getBetaHeader(modelID, clientBetaHeader, body)
 				if !strings.Contains(beta, claude.BetaTokenCounting) {
 					beta = beta + "," + claude.BetaTokenCounting
 				}
@@ -8630,6 +8708,10 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
+	// Inject a fresh x-client-request-id UUID if the client did not supply one,
+	// mirroring real claude-cli/2.1.100 (see buildUpstreamRequest for rationale).
+	ensureClientRequestID(req)
+
 	if c != nil && tokenType == "oauth" {
 		c.Set(claudeMimicDebugInfoKey, buildClaudeMimicDebugLine(req, body, account, tokenType, mimicClaudeCode))
 	}
@@ -8638,6 +8720,21 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 
 	return req, nil
+}
+
+// ensureClientRequestID guarantees req carries an x-client-request-id header
+// with a valid UUID. If the client already sent one (via pass-through whitelist),
+// it is preserved; otherwise a fresh v4 UUID is generated. Real claude-cli
+// always sends this header with a per-request UUID (cap 008 and cap 011 use
+// different values), and its long-term absence is a stable negative fingerprint.
+func ensureClientRequestID(req *http.Request) {
+	if req == nil {
+		return
+	}
+	if v := strings.TrimSpace(getHeaderRaw(req.Header, "x-client-request-id")); v != "" {
+		return
+	}
+	setHeaderRaw(req.Header, "x-client-request-id", uuid.NewString())
 }
 
 // countTokensError 返回 count_tokens 错误响应
