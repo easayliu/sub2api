@@ -25,9 +25,10 @@ var (
 )
 
 // 默认指纹值（当客户端未提供时使用）
-// Aligned with claude-cli/2.1.100 captured traffic.
+// Aligned with claude-cli/2.1.101 captured traffic (capture/raw/00037).
+// X-Stainless-Package-Version is unchanged from 2.1.100.
 var defaultFingerprint = Fingerprint{
-	UserAgent:               "claude-cli/2.1.100 (external, cli)",
+	UserAgent:               "claude-cli/2.1.101 (external, cli)",
 	StainlessLang:           "js",
 	StainlessPackageVersion: "0.81.0",
 	StainlessOS:             "MacOS",

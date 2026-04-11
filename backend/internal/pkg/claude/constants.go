@@ -59,23 +59,30 @@ const APIKeyBetaHeader = BetaClaudeCode + "," + BetaInterleavedThinking
 const APIKeyHaikuBetaHeader = BetaInterleavedThinking
 
 // MessageBetaRequestKind 描述一个 /v1/messages 请求的特征，用于动态构造
-// anthropic-beta header 与真实 claude-cli/2.1.100 的抓包行为对齐。
+// anthropic-beta header 与真实 claude-cli 的抓包行为对齐。
 //
-// 抓包依据（capture/008, capture/011）:
+// 抓包依据：
 //
-//	haiku quota probe (max_tokens=1, no tools, no structured output):
-//	  anthropic-beta = oauth, interleaved-thinking, redact-thinking,
-//	                   context-management, prompt-caching-scope
+//	capture/raw/00037 (claude-cli/2.1.101, opus-4-6, has tools, has effort):
+//	  claude-code, oauth, context-1m, interleaved-thinking, redact-thinking,
+//	  context-management, prompt-caching-scope, advisor-tool,
+//	  advanced-tool-use, effort
 //
-//	haiku title gen (no tools, structured output via output_config.format):
-//	  adds: advisor-tool, structured-outputs
+//	capture/011 (claude-cli/2.1.100, haiku, no tools, structured output):
+//	  oauth, interleaved-thinking, redact-thinking, context-management,
+//	  prompt-caching-scope, advisor-tool, structured-outputs
+//
+//	capture/008 (claude-cli/2.1.100, haiku quota probe, no tools):
+//	  oauth, interleaved-thinking, redact-thinking, context-management,
+//	  prompt-caching-scope
 type MessageBetaRequestKind struct {
 	ModelID          string
 	HasTools         bool
 	HasStructuredOut bool
+	HasEffort        bool // true when output_config.effort is set (effort beta)
 	// IsQuotaProbe marks the request as the startup "quota" probe (see
 	// capture/008). Currently informational — the probe body carries no
-	// tools and no structured output, so the default branch of
+	// tools, no effort, no structured output, so the default branch of
 	// BuildMessageBetaTokens already yields the capture-accurate token
 	// list. This field is preserved as a labelled call site so future
 	// capture evidence that differentiates probe betas can be wired in
@@ -91,47 +98,74 @@ type MessageBetaRequestKind struct {
 // /v1/messages (or count_tokens) request, matching the dynamic per-request
 // pattern observed in real claude-cli traffic.
 //
-// Token order mirrors cap 008/011 exactly so wire-level diff stays empty:
+// Token order mirrors capture/raw/00037 (claude-cli/2.1.101 opus) for
+// non-haiku and capture/011 for haiku, so wire-level diff stays empty:
 //
-//	[claude-code], [oauth], interleaved-thinking, redact-thinking,
-//	context-management, prompt-caching-scope,
-//	[advisor-tool, structured-outputs], [token-counting]
+//	non-haiku: claude-code, oauth, context-1m, interleaved-thinking,
+//	           redact-thinking, context-management, prompt-caching-scope,
+//	           advisor-tool, [advanced-tool-use], [effort],
+//	           [structured-outputs], [token-counting]
 //
-// claude-code and oauth are conditional (see MessageBetaRequestKind fields).
-// advisor-tool+structured-outputs are only appended for structured output
-// requests, and token-counting only for count_tokens.
+//	haiku:     oauth, interleaved-thinking, redact-thinking,
+//	           context-management, prompt-caching-scope, advisor-tool,
+//	           [structured-outputs], [token-counting]
+//
+// Conditional tokens (in []):
+//   - advanced-tool-use: HasTools=true (non-haiku only)
+//   - effort:            HasEffort=true (non-haiku only)
+//   - structured-outputs: HasStructuredOut=true
+//   - token-counting:    IncludeTokenCounts=true
+//
+// Notes on non-haiku-only tokens:
+//   - claude-code: legacy safety claim, preserved
+//   - context-1m: 1M context window beta, capture shows non-haiku only
 func BuildMessageBetaTokens(kind MessageBetaRequestKind) []string {
 	isHaiku := strings.Contains(strings.ToLower(kind.ModelID), "haiku")
 
-	tokens := make([]string, 0, 10)
+	tokens := make([]string, 0, 12)
 
-	// Historical safety net: for non-haiku on OAuth, the code path has long
-	// forced claude-code-20250219 to avoid upstream rejecting the request as
-	// third-party ("out of extra usage"). Captured traffic for haiku shows
-	// this token is NOT on the wire; we preserve the non-haiku safety claim
-	// until non-haiku capture evidence allows us to drop it too.
+	// claude-code-20250219: non-haiku safety net (see field comment).
 	if kind.IncludeClaudeCode && !isHaiku {
 		tokens = append(tokens, BetaClaudeCode)
 	}
 
+	// oauth-2025-04-20: required for OAuth accounts.
 	if kind.IncludeOAuth {
 		tokens = append(tokens, BetaOAuth)
 	}
 
-	// Core betas sent by real claude-cli on every /v1/messages (cap 008).
+	// context-1m-2025-08-07: 1M context window. Captures show only non-haiku.
+	if !isHaiku {
+		tokens = append(tokens, BetaContext1M)
+	}
+
+	// Core betas sent on every /v1/messages by claude-cli/2.1.100+.
 	tokens = append(tokens,
 		BetaInterleavedThinking,
 		BetaRedactThinking,
 		BetaContextManagement,
 		BetaPromptCachingScope,
+		BetaAdvisorTool,
 	)
 
-	// Structured output (output_config.format) — cap 011.
+	// advanced-tool-use-2025-11-20: real CLI sends only when tools are
+	// present (capture/raw/00037 has 10 tools and includes this; capture/011
+	// has 0 tools and does not). Non-haiku only.
+	if !isHaiku && kind.HasTools {
+		tokens = append(tokens, BetaAdvancedToolUse)
+	}
+
+	// effort-2025-11-24: real CLI sends only when output_config.effort is
+	// set (capture/raw/00037 has effort=medium and includes this; capture/011
+	// has no output_config and does not). Non-haiku only.
+	if !isHaiku && kind.HasEffort {
+		tokens = append(tokens, BetaEffort)
+	}
+
+	// structured-outputs-2025-12-15: when output_config.format with schema
+	// is present (capture/011 has json_schema and includes this).
 	if kind.HasStructuredOut {
-		tokens = append(tokens,
-			BetaAdvisorTool,
-			BetaStructuredOutputs,
-		)
+		tokens = append(tokens, BetaStructuredOutputs)
 	}
 
 	// count_tokens endpoint needs the token-counting beta appended.
@@ -143,11 +177,15 @@ func BuildMessageBetaTokens(kind MessageBetaRequestKind) []string {
 }
 
 // DefaultHeaders 是 Claude Code 客户端默认请求头。
-// Values are aligned with claude-cli/2.1.100 captured traffic. Keep these in
-// sync with recent Claude CLI traffic to reduce the chance that Claude
-// Code-scoped OAuth credentials are rejected as "non-CLI" usage.
+// Values are aligned with claude-cli/2.1.101 captured traffic
+// (capture/raw/00037, body 74384 bytes, opus-4-6 main message). Keep
+// these in sync with recent Claude CLI traffic to reduce the chance
+// that Claude Code-scoped OAuth credentials are rejected as "non-CLI"
+// usage.
+//
+// X-Stainless-Package-Version stayed at 0.81.0 between 2.1.100 and 2.1.101.
 var DefaultHeaders = map[string]string{
-	"User-Agent":                                "claude-cli/2.1.100 (external, cli)",
+	"User-Agent":                                "claude-cli/2.1.101 (external, cli)",
 	"X-Stainless-Lang":                          "js",
 	"X-Stainless-Package-Version":               "0.81.0",
 	"X-Stainless-OS":                            "MacOS",

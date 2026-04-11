@@ -54,16 +54,20 @@ const (
 	// placeholder is rewritten in two passes downstream:
 	//
 	//	1. syncBillingHeaderVersion (gateway_billing_header.go) replaces the
-	//	   "2.1.100" portion with the cc_version extracted from the account's
-	//	   fingerprint UA, leaving the ".f22" build suffix intact (the regex
-	//	   only matches X.Y.Z so trailing ".f22" survives).
+	//	   "2.1.101" portion with the cc_version extracted from the account's
+	//	   fingerprint UA, leaving the ".8aa" build suffix intact (the regex
+	//	   only matches X.Y.Z so trailing ".8aa" survives).
 	//	2. signBillingHeaderCCH replaces "cch=00000" with the xxHash64 signature
 	//	   of the finalized request body.
 	//
-	// Real claude-cli (capture/011, capture/012) sends this block as system[0]
-	// with NO cache_control. The ".f22" build suffix is taken from those
-	// captures (claude-cli/2.1.100 build f22).
-	claudeCodeBillingHeaderText = "x-anthropic-billing-header: cc_version=2.1.100.f22; cc_entrypoint=cli; cch=00000;"
+	// Real claude-cli/2.1.101 (capture/raw/00037) sends this block as system[0]
+	// with NO cache_control. The ".8aa" build suffix is the build identifier
+	// for claude-cli 2.1.101 observed on the wire. NOTE: build suffix is
+	// version-specific — earlier captures (cap 011/012, claude-cli/2.1.100)
+	// used ".f22". When bumping to a new CLI version, this suffix MUST be
+	// re-captured because cc_version=A.B.C.<wrong-suffix> is an invalid
+	// combination Anthropic can detect.
+	claudeCodeBillingHeaderText = "x-anthropic-billing-header: cc_version=2.1.101.8aa; cc_entrypoint=cli; cch=00000;"
 
 	maxCacheControlBlocks = 4 // Anthropic API 允许的最大 cache_control 块数量
 
@@ -5834,15 +5838,15 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
 			// Build the required beta token list dynamically per request type to
-			// mirror real claude-cli/2.1.100 traffic (cap 008/011). This replaces
-			// the old fixed [claude-code?, oauth, interleaved-thinking] list,
-			// which diverged from captures by missing redact-thinking /
-			// context-management / prompt-caching-scope, and missing
-			// advisor-tool + structured-outputs for structured-output requests.
+			// mirror real claude-cli/2.1.101 traffic (capture/raw/00037 for opus,
+			// capture/011 for haiku). Order and content are anchored to those
+			// captures including the new tokens advertised by 2.1.101: context-1m,
+			// advanced-tool-use, effort.
 			requiredBetas := claude.BuildMessageBetaTokens(claude.MessageBetaRequestKind{
 				ModelID:           modelID,
 				HasTools:          bodyHasTools(body),
 				HasStructuredOut:  bodyHasStructuredOutput(body),
+				HasEffort:         bodyHasEffort(body),
 				IsQuotaProbe:      isQuotaProbeContext(ctx),
 				IncludeClaudeCode: true, // preserve non-haiku safety claim
 				IncludeOAuth:      true,
@@ -5965,6 +5969,7 @@ func (s *GatewayService) getBetaHeader(modelID string, clientBetaHeader string, 
 		ModelID:           modelID,
 		HasTools:          bodyHasTools(body),
 		HasStructuredOut:  bodyHasStructuredOutput(body),
+		HasEffort:         bodyHasEffort(body),
 		IncludeClaudeCode: true,
 		IncludeOAuth:      true,
 	})
@@ -6001,6 +6006,16 @@ func bodyHasStructuredOutput(body []byte) bool {
 		return false
 	}
 	return gjson.GetBytes(body, "output_config.format").Exists()
+}
+
+// bodyHasEffort reports whether the request body carries an
+// output_config.effort field. Real claude-cli/2.1.101 (capture/raw/00037)
+// emits the effort-2025-11-24 beta only when this field is set.
+func bodyHasEffort(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	return gjson.GetBytes(body, "output_config.effort").Exists()
 }
 
 func defaultAPIKeyBetaHeader(body []byte) string {
@@ -8798,6 +8813,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 				ModelID:            modelID,
 				HasTools:           bodyHasTools(body),
 				HasStructuredOut:   bodyHasStructuredOutput(body),
+				HasEffort:          bodyHasEffort(body),
 				IsCountTokens:      true,
 				IncludeClaudeCode:  true,
 				IncludeOAuth:       true,
@@ -8813,6 +8829,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 					ModelID:            modelID,
 					HasTools:           bodyHasTools(body),
 					HasStructuredOut:   bodyHasStructuredOutput(body),
+					HasEffort:          bodyHasEffort(body),
 					IsCountTokens:      true,
 					IncludeClaudeCode:  true,
 					IncludeOAuth:       true,
