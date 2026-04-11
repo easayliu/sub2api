@@ -48,7 +48,24 @@ const (
 	// to match real Claude CLI traffic as closely as possible. When we need a visual
 	// separator between system blocks, we add "\n\n" at concatenation time.
 	claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
-	maxCacheControlBlocks  = 4 // Anthropic API 允许的最大 cache_control 块数量
+
+	// claudeCodeBillingHeaderText is the placeholder x-anthropic-billing-header
+	// system block that mimic-path requests prepend to their system array. The
+	// placeholder is rewritten in two passes downstream:
+	//
+	//	1. syncBillingHeaderVersion (gateway_billing_header.go) replaces the
+	//	   "2.1.100" portion with the cc_version extracted from the account's
+	//	   fingerprint UA, leaving the ".f22" build suffix intact (the regex
+	//	   only matches X.Y.Z so trailing ".f22" survives).
+	//	2. signBillingHeaderCCH replaces "cch=00000" with the xxHash64 signature
+	//	   of the finalized request body.
+	//
+	// Real claude-cli (capture/011, capture/012) sends this block as system[0]
+	// with NO cache_control. The ".f22" build suffix is taken from those
+	// captures (claude-cli/2.1.100 build f22).
+	claudeCodeBillingHeaderText = "x-anthropic-billing-header: cc_version=2.1.100.f22; cc_entrypoint=cli; cch=00000;"
+
+	maxCacheControlBlocks = 4 // Anthropic API 允许的最大 cache_control 块数量
 
 	defaultUserGroupRateCacheTTL = 30 * time.Second
 	defaultModelsListCacheTTL    = 15 * time.Second
@@ -3700,7 +3717,22 @@ func hasClaudeCodePrefix(text string) bool {
 // 处理 null、字符串、数组三种格式
 func injectClaudeCodePrompt(body []byte, system any) []byte {
 	system = normalizeSystemParam(system)
-	claudeCodeBlock, err := marshalAnthropicSystemTextBlock(claudeCodeSystemPrompt, true)
+
+	// Block 0: x-anthropic-billing-header placeholder. Real claude-cli
+	// (capture/011, capture/012) always sends this as the first system
+	// block, with no cache_control. cc_version and cch are rewritten
+	// downstream by syncBillingHeaderVersion + signBillingHeaderCCH.
+	billingHeaderBlock, err := marshalAnthropicSystemTextBlock(claudeCodeBillingHeaderText, false)
+	if err != nil {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to build billing header block: %v", err)
+		return body
+	}
+	// Block 1: Claude Code banner. Real claude-cli (capture/011, capture/012)
+	// also sends this with no cache_control. The previous behaviour of
+	// setting cache_control: ephemeral here was a divergence from real CLI
+	// traffic and gave Anthropic a stable fingerprint to detect mimic-path
+	// requests.
+	claudeCodeBlock, err := marshalAnthropicSystemTextBlock(claudeCodeSystemPrompt, false)
 	if err != nil {
 		logger.LegacyPrintf("service.gateway", "Warning: failed to build Claude Code prompt block: %v", err)
 		return body
@@ -3710,15 +3742,17 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 	// a blank line. This helps when upstream concatenates system instructions.
 	claudeCodePrefix := strings.TrimSpace(claudeCodeSystemPrompt)
 
-	var items [][]byte
+	// All result paths start with [billing header, banner]; subsequent
+	// blocks come from the incoming system payload.
+	items := [][]byte{billingHeaderBlock, claudeCodeBlock}
 
 	switch v := system.(type) {
 	case nil:
-		items = [][]byte{claudeCodeBlock}
+		// already initialized
 	case string:
 		// Be tolerant of older/newer clients that may differ only by trailing whitespace/newlines.
 		if strings.TrimSpace(v) == "" || strings.TrimSpace(v) == strings.TrimSpace(claudeCodeSystemPrompt) {
-			items = [][]byte{claudeCodeBlock}
+			// already done
 		} else {
 			// Mirror opencode behavior: keep the banner as a separate system entry,
 			// but also prefix the next system text with the banner.
@@ -3731,11 +3765,9 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 				logger.LegacyPrintf("service.gateway", "Warning: failed to build prefixed Claude Code system block: %v", buildErr)
 				return body
 			}
-			items = [][]byte{claudeCodeBlock, nextBlock}
+			items = append(items, nextBlock)
 		}
 	case []any:
-		items = make([][]byte, 0, len(v)+1)
-		items = append(items, claudeCodeBlock)
 		prefixedNext := false
 		systemResult := gjson.GetBytes(body, "system")
 		if systemResult.IsArray() {
@@ -3789,7 +3821,7 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 			}
 		}
 	default:
-		items = [][]byte{claudeCodeBlock}
+		// already initialized to [billing header, banner]
 	}
 
 	result, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw(items))
@@ -3825,17 +3857,31 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 		originalSystemText = strings.Join(parts, "\n\n")
 	}
 
-	// 2. 将 system 替换为 Claude Code 标准提示词（array 格式，与真实 Claude Code 一致）
-	//    真实 Claude Code 始终以 [{type: "text", text: "...", cache_control: {type: "ephemeral"}}] 发送 system。
-	//    使用 string 格式会被 Anthropic 检测为第三方应用。
-	claudeCodeSystemBlock := []map[string]any{
+	// 2. 将 system 替换为 [billing header, banner] 两个 text block，
+	//    与 capture/011 + capture/012 抓包到的真实 claude-cli/2.1.100 system 结构对齐：
+	//
+	//      system[0] = "x-anthropic-billing-header: cc_version=...; cc_entrypoint=cli; cch=...;"  无 cache_control
+	//      system[1] = "You are Claude Code, Anthropic's official CLI for Claude."                 无 cache_control
+	//
+	//    历史实现只产出单一 banner 块且带 cache_control: ephemeral，导致：
+	//      - syncBillingHeaderVersion / signBillingHeaderCCH 永远 no-op（找不到承载块）
+	//      - 每条 mimic 请求都缺 billing header，是稳定的"非 CC 客户端"指纹
+	//      - banner 上多余的 cache_control 也是与真实 CLI 不一致的指纹位
+	//
+	//    cc_version 中的 "2.1.100" 会被 syncBillingHeaderVersion 替换为指纹 UA 解析出的版本号，
+	//    ".f22" build 后缀因为正则只匹配 X.Y.Z 而被保留（与 cap 011/012 一致）。
+	//    "cch=00000" 占位符会被 signBillingHeaderCCH 用 xxHash64 签名替换。
+	mimicSystemBlocks := []map[string]any{
 		{
-			"type":          "text",
-			"text":          claudeCodeSystemPrompt,
-			"cache_control": map[string]string{"type": "ephemeral"},
+			"type": "text",
+			"text": claudeCodeBillingHeaderText,
+		},
+		{
+			"type": "text",
+			"text": claudeCodeSystemPrompt,
 		},
 	}
-	out, ok := setJSONValueBytes(body, "system", claudeCodeSystemBlock)
+	out, ok := setJSONValueBytes(body, "system", mimicSystemBlocks)
 	if !ok {
 		logger.LegacyPrintf("service.gateway", "Warning: failed to set Claude Code system prompt")
 		return body
@@ -4119,9 +4165,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			systemRewritten = true
 		}
 
-		// system 被重写时保留 CC prompt 的 cache_control: ephemeral（匹配真实 Claude Code 行为）；
-		// 未重写时（haiku / 已含 CC 前缀）剥离客户端 cache_control，与原有行为一致。
-		// 两种情况下 enforceCacheControlLimit 都会兜底处理上限。
+		// system 被重写时无需 strip：rewriteSystemForNonClaudeCode 产出的两个块
+		// （billing header + banner）本来就不带 cache_control，与 capture/011/012 一致；
+		// 客户端原 system 的 cache_control 跟随原文一起被迁移到 messages 中。
+		// 未重写时（haiku / 已含 CC 前缀）则需要剥离客户端 cache_control，与历史行为一致。
+		// 两种情况下 enforceCacheControlLimit 都会兜底处理 4 块上限。
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: !systemRewritten}
 		if s.identityService != nil {
 			fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, c.Request.Header)

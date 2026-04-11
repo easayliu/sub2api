@@ -158,51 +158,52 @@ func TestSystemIncludesClaudeCodePrompt(t *testing.T) {
 func TestInjectClaudeCodePrompt(t *testing.T) {
 	claudePrefix := strings.TrimSpace(claudeCodeSystemPrompt)
 
+	// Every produced system array now starts with the same two blocks
+	// (billing header at [0], Claude Code banner at [1]), matching real
+	// claude-cli/2.1.100 capture/011 + capture/012. Tests only assert on
+	// the trailing block beyond [0] and [1] (when the incoming system
+	// contained additional content).
 	tests := []struct {
-		name           string
-		body           string
-		system         any
-		wantSystemLen  int
-		wantFirstText  string
-		wantSecondText string
+		name          string
+		body          string
+		system        any
+		wantSystemLen int
+		// wantThirdText is the text of system[2] (the merged client content
+		// block) when present, or "" when injection produces only the
+		// billing header + banner pair.
+		wantThirdText string
 	}{
 		{
 			name:          "nil system",
 			body:          `{"model":"claude-3"}`,
 			system:        nil,
-			wantSystemLen: 1,
-			wantFirstText: claudeCodeSystemPrompt,
+			wantSystemLen: 2,
 		},
 		{
 			name:          "empty string system",
 			body:          `{"model":"claude-3"}`,
 			system:        "",
-			wantSystemLen: 1,
-			wantFirstText: claudeCodeSystemPrompt,
+			wantSystemLen: 2,
 		},
 		{
-			name:           "string system",
-			body:           `{"model":"claude-3"}`,
-			system:         "Custom prompt",
-			wantSystemLen:  2,
-			wantFirstText:  claudeCodeSystemPrompt,
-			wantSecondText: claudePrefix + "\n\nCustom prompt",
+			name:          "string system",
+			body:          `{"model":"claude-3"}`,
+			system:        "Custom prompt",
+			wantSystemLen: 3,
+			wantThirdText: claudePrefix + "\n\nCustom prompt",
 		},
 		{
 			name:          "string system equals Claude Code prompt",
 			body:          `{"model":"claude-3"}`,
 			system:        claudeCodeSystemPrompt,
-			wantSystemLen: 1,
-			wantFirstText: claudeCodeSystemPrompt,
+			wantSystemLen: 2,
 		},
 		{
-			name:   "array system",
-			body:   `{"model":"claude-3"}`,
-			system: []any{map[string]any{"type": "text", "text": "Custom"}},
-			// Claude Code + Custom = 2
-			wantSystemLen:  2,
-			wantFirstText:  claudeCodeSystemPrompt,
-			wantSecondText: claudePrefix + "\n\nCustom",
+			name:          "array system",
+			body:          `{"model":"claude-3"}`,
+			system:        []any{map[string]any{"type": "text", "text": "Custom"}},
+			wantSystemLen: 3,
+			wantThirdText: claudePrefix + "\n\nCustom",
 		},
 		{
 			name: "array system with existing Claude Code prompt (should dedupe)",
@@ -211,40 +212,35 @@ func TestInjectClaudeCodePrompt(t *testing.T) {
 				map[string]any{"type": "text", "text": claudeCodeSystemPrompt},
 				map[string]any{"type": "text", "text": "Other"},
 			},
-			// Claude Code at start + Other = 2 (deduped)
-			wantSystemLen:  2,
-			wantFirstText:  claudeCodeSystemPrompt,
-			wantSecondText: claudePrefix + "\n\nOther",
+			// Existing banner is deduped; "Other" gets banner-prefixed at [2].
+			wantSystemLen: 3,
+			wantThirdText: claudePrefix + "\n\nOther",
 		},
 		{
 			name:          "empty array",
 			body:          `{"model":"claude-3"}`,
 			system:        []any{},
-			wantSystemLen: 1,
-			wantFirstText: claudeCodeSystemPrompt,
+			wantSystemLen: 2,
 		},
 		// json.RawMessage cases (conversion path: ForwardAsResponses / ForwardAsChatCompletions)
 		{
-			name:           "json.RawMessage string system",
-			body:           `{"model":"claude-3","system":"Custom prompt"}`,
-			system:         json.RawMessage(`"Custom prompt"`),
-			wantSystemLen:  2,
-			wantFirstText:  claudeCodeSystemPrompt,
-			wantSecondText: claudePrefix + "\n\nCustom prompt",
+			name:          "json.RawMessage string system",
+			body:          `{"model":"claude-3","system":"Custom prompt"}`,
+			system:        json.RawMessage(`"Custom prompt"`),
+			wantSystemLen: 3,
+			wantThirdText: claudePrefix + "\n\nCustom prompt",
 		},
 		{
 			name:          "json.RawMessage nil system",
 			body:          `{"model":"claude-3"}`,
 			system:        json.RawMessage(nil),
-			wantSystemLen: 1,
-			wantFirstText: claudeCodeSystemPrompt,
+			wantSystemLen: 2,
 		},
 		{
 			name:          "json.RawMessage Claude Code prompt (should not duplicate)",
 			body:          `{"model":"claude-3","system":"` + claudeCodeSystemPrompt + `"}`,
 			system:        json.RawMessage(`"` + claudeCodeSystemPrompt + `"`),
-			wantSystemLen: 1,
-			wantFirstText: claudeCodeSystemPrompt,
+			wantSystemLen: 2,
 		},
 	}
 
@@ -260,20 +256,27 @@ func TestInjectClaudeCodePrompt(t *testing.T) {
 			require.True(t, ok, "system should be an array")
 			require.Len(t, system, tt.wantSystemLen)
 
-			first, ok := system[0].(map[string]any)
+			// system[0] is always the billing header placeholder, no cache_control.
+			billing, ok := system[0].(map[string]any)
 			require.True(t, ok)
-			require.Equal(t, tt.wantFirstText, first["text"])
-			require.Equal(t, "text", first["type"])
+			require.Equal(t, "text", billing["type"])
+			require.Equal(t, claudeCodeBillingHeaderText, billing["text"])
+			_, hasCC := billing["cache_control"]
+			require.False(t, hasCC, "billing header block must NOT have cache_control")
 
-			// Check cache_control
-			cc, ok := first["cache_control"].(map[string]any)
+			// system[1] is always the Claude Code banner, no cache_control.
+			banner, ok := system[1].(map[string]any)
 			require.True(t, ok)
-			require.Equal(t, "ephemeral", cc["type"])
+			require.Equal(t, "text", banner["type"])
+			require.Equal(t, claudeCodeSystemPrompt, banner["text"])
+			_, hasCC = banner["cache_control"]
+			require.False(t, hasCC, "banner block must NOT have cache_control")
 
-			if tt.wantSecondText != "" && len(system) > 1 {
-				second, ok := system[1].(map[string]any)
+			if tt.wantThirdText != "" {
+				require.GreaterOrEqual(t, len(system), 3)
+				third, ok := system[2].(map[string]any)
 				require.True(t, ok)
-				require.Equal(t, tt.wantSecondText, second["text"])
+				require.Equal(t, tt.wantThirdText, third["text"])
 			}
 		})
 	}
@@ -402,17 +405,28 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			err := json.Unmarshal(result, &parsed)
 			require.NoError(t, err)
 
-			// system 应为 array 格式: [{type: "text", text: "...", cache_control: {type: "ephemeral"}}]
+			// system 应为 2 块 array：与真实 claude-cli/2.1.100 抓包对齐
+			//   system[0] = x-anthropic-billing-header 占位符（无 cache_control）
+			//   system[1] = Claude Code banner（无 cache_control）
 			systemArr, ok := parsed["system"].([]any)
 			require.True(t, ok, "system should be an array, got %T", parsed["system"])
-			require.Len(t, systemArr, 1, "system array should have exactly 1 block")
-			systemBlock, ok := systemArr[0].(map[string]any)
+			require.Len(t, systemArr, 2, "system array should have exactly 2 blocks (billing header + banner)")
+
+			// system[0]: billing header placeholder
+			billingBlock, ok := systemArr[0].(map[string]any)
 			require.True(t, ok)
-			require.Equal(t, "text", systemBlock["type"])
-			require.Equal(t, tt.wantSystemText, systemBlock["text"])
-			cc, ok := systemBlock["cache_control"].(map[string]any)
-			require.True(t, ok, "system block should have cache_control")
-			require.Equal(t, "ephemeral", cc["type"])
+			require.Equal(t, "text", billingBlock["type"])
+			require.Equal(t, claudeCodeBillingHeaderText, billingBlock["text"])
+			_, hasCC := billingBlock["cache_control"]
+			require.False(t, hasCC, "billing header block must NOT have cache_control")
+
+			// system[1]: Claude Code banner
+			bannerBlock, ok := systemArr[1].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, "text", bannerBlock["type"])
+			require.Equal(t, tt.wantSystemText, bannerBlock["text"])
+			_, hasCC = bannerBlock["cache_control"]
+			require.False(t, hasCC, "banner block must NOT have cache_control")
 
 			// 检查 messages
 			messages, ok := parsed["messages"].([]any)

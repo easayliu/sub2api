@@ -75,6 +75,9 @@ func TestInjectClaudeCodePrompt_PreservesFieldOrder(t *testing.T) {
 	resultStr := string(result)
 
 	assertJSONTokenOrder(t, resultStr, `"alpha"`, `"system"`, `"messages"`, `"omega"`)
+	// The merged client block (id=block-1) is now system[2] and is preceded
+	// by [billing header, banner]. Field order within the existing block is
+	// still preserved by the prefix-only sjson edit.
 	require.Contains(t, resultStr, `{"id":"block-1","type":"text","text":"`+claudeCodeSystemPrompt+`\n\nCustom"}`)
 }
 
