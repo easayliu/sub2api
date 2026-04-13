@@ -141,3 +141,101 @@ func TestEnforceCacheControlLimit_GlobalScopeWithOverflowCountsOnlyLocal(t *test
 	// Global scope block survives.
 	require.Contains(t, resultStr, `"scope":"global"`)
 }
+
+// --- ensureMimicCacheControl tests ---
+
+// TestEnsureMimicCacheControl_InjectsOnEmptyBody verifies that when a
+// mimic-path request has no cache_control at all, the function injects:
+//   - system[2] (first client block after billing+banner): scope=global, ttl=1h
+//   - last user message's last content block: ttl=1h
+func TestEnsureMimicCacheControl_InjectsOnEmptyBody(t *testing.T) {
+	body := []byte(`{"model":"claude-opus-4-6","system":[` +
+		`{"type":"text","text":"billing-header"},` +
+		`{"type":"text","text":"You are Claude Code."},` +
+		`{"type":"text","text":"User custom system prompt"}` +
+		`],"messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]}]}`)
+
+	result := ensureMimicCacheControl(body, "claude-opus-4-6")
+	resultStr := string(result)
+
+	// Should have exactly 2 cache_control blocks injected.
+	require.Equal(t, 2, strings.Count(resultStr, `"cache_control"`))
+
+	// system[2] should have scope=global, ttl=1h, type=ephemeral
+	require.Contains(t, resultStr, `"scope":"global"`)
+	require.Contains(t, resultStr, `"ttl":"1h"`)
+
+	// The last user content block should have cache_control with ttl=1h but no scope.
+	// Verify both are present in the output.
+	require.Equal(t, 2, strings.Count(resultStr, `"type":"ephemeral"`))
+}
+
+// TestEnsureMimicCacheControl_SkipsHaiku verifies that haiku model requests
+// do not get cache_control injected, matching real CLI behaviour.
+func TestEnsureMimicCacheControl_SkipsHaiku(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5-20251001","system":[` +
+		`{"type":"text","text":"billing"},` +
+		`{"type":"text","text":"banner"},` +
+		`{"type":"text","text":"prompt"}` +
+		`],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result := ensureMimicCacheControl(body, "claude-haiku-4-5-20251001")
+
+	// No cache_control should be injected.
+	require.NotContains(t, string(result), `"cache_control"`)
+}
+
+// TestEnsureMimicCacheControl_SkipsWhenAlreadyPresent verifies that the
+// function is a no-op when cache_control already exists in the body.
+func TestEnsureMimicCacheControl_SkipsWhenAlreadyPresent(t *testing.T) {
+	body := []byte(`{"model":"claude-opus-4-6","system":[` +
+		`{"type":"text","text":"billing"},` +
+		`{"type":"text","text":"banner"},` +
+		`{"type":"text","text":"prompt","cache_control":{"type":"ephemeral"}}` +
+		`],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result := ensureMimicCacheControl(body, "claude-opus-4-6")
+
+	// Should still have exactly 1 cache_control (the original).
+	require.Equal(t, 1, strings.Count(string(result), `"cache_control"`))
+}
+
+// TestEnsureMimicCacheControl_OnlyTwoSystemBlocks verifies that when system
+// has only [billing, banner] (no client blocks), only the message injection
+// runs.
+func TestEnsureMimicCacheControl_OnlyTwoSystemBlocks(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-4-6","system":[` +
+		`{"type":"text","text":"billing"},` +
+		`{"type":"text","text":"banner"}` +
+		`],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result := ensureMimicCacheControl(body, "claude-sonnet-4-6")
+	resultStr := string(result)
+
+	// Only message injection, no system injection.
+	require.Equal(t, 1, strings.Count(resultStr, `"cache_control"`))
+	require.NotContains(t, resultStr, `"scope":"global"`)
+}
+
+// TestEnsureMimicCacheControl_MultipleUserMessages verifies that injection
+// targets the last user message's last content block.
+func TestEnsureMimicCacheControl_MultipleUserMessages(t *testing.T) {
+	body := []byte(`{"model":"claude-opus-4-6","system":[` +
+		`{"type":"text","text":"billing"},` +
+		`{"type":"text","text":"banner"},` +
+		`{"type":"text","text":"prompt"}` +
+		`],"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"first"}]},` +
+		`{"role":"assistant","content":[{"type":"text","text":"reply"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"second-a"},{"type":"text","text":"second-b"}]}` +
+		`]}`)
+
+	result := ensureMimicCacheControl(body, "claude-opus-4-6")
+	resultStr := string(result)
+
+	require.Equal(t, 2, strings.Count(resultStr, `"cache_control"`))
+
+	// The message cache_control should be on "second-b" (last content of last user msg).
+	// Verify "second-b" has cache_control by checking its adjacency.
+	require.Contains(t, resultStr, `"text":"second-b","cache_control"`)
+}

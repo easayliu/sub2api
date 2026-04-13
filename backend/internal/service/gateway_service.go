@@ -4036,6 +4036,98 @@ func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, 
 	return invalidThinking, messagePaths, systemPaths
 }
 
+// ensureMimicCacheControl injects cache_control markers into a mimic-path
+// request body when the client did not supply any. Real claude-cli/2.1.100+
+// (with prompt-caching-scope beta) always sends:
+//
+//   - system block right after [billing header, banner]: cache_control with
+//     type=ephemeral, ttl=1h, scope=global (capture/raw/00031, capture/012)
+//   - last user message's last content block: cache_control with
+//     type=ephemeral, ttl=1h (capture/raw/00031, capture/012)
+//
+// A request that carries every other Claude Code fingerprint but zero
+// cache_control blocks is a strong negative signal Anthropic can use to
+// detect non-CLI clients. This function closes that gap.
+//
+// Haiku requests are exempt: real CLI captures (capture/011, capture/raw/00022)
+// show no cache_control on haiku.
+func ensureMimicCacheControl(body []byte, modelID string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	// Haiku requests: real CLI sends no cache_control.
+	if strings.Contains(strings.ToLower(modelID), "haiku") {
+		return body
+	}
+
+	// Check if any cache_control already exists anywhere in the body.
+	// If the client (or prior rewrite) already set cache_control, do not
+	// double-inject — just let enforceCacheControlLimit cap the count.
+	// Use a simple byte scan — faster and more reliable than gjson
+	// array-query syntax for this "exists anywhere?" check.
+	if bytes.Contains(body, []byte(`"cache_control"`)) {
+		return body
+	}
+
+	out := body
+
+	// 1. Inject cache_control on the first client system block after
+	//    [billing header (idx 0), banner (idx 1)]. That is system[2] in
+	//    the rewritten layout, matching capture/raw/00031.
+	system := gjson.GetBytes(out, "system")
+	if system.IsArray() {
+		sysLen := 0
+		system.ForEach(func(_, _ gjson.Result) bool { sysLen++; return true })
+		if sysLen > 2 {
+			// system[2] is the first client block after billing+banner.
+			path := "system.2.cache_control"
+			if next, err := sjson.SetBytes(out, path+".type", "ephemeral"); err == nil {
+				out = next
+			}
+			if next, err := sjson.SetBytes(out, path+".ttl", "1h"); err == nil {
+				out = next
+			}
+			if next, err := sjson.SetBytes(out, path+".scope", "global"); err == nil {
+				out = next
+			}
+		}
+	}
+
+	// 2. Inject cache_control on the last user message's last content block.
+	//    Scan backwards through messages to find the last role=user entry.
+	messages := gjson.GetBytes(out, "messages")
+	if messages.IsArray() {
+		lastUserIdx := -1
+		msgIdx := 0
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			if msg.Get("role").String() == "user" {
+				lastUserIdx = msgIdx
+			}
+			msgIdx++
+			return true
+		})
+		if lastUserIdx >= 0 {
+			content := gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastUserIdx))
+			if content.IsArray() {
+				contentLen := 0
+				content.ForEach(func(_, _ gjson.Result) bool { contentLen++; return true })
+				if contentLen > 0 {
+					path := fmt.Sprintf("messages.%d.content.%d.cache_control", lastUserIdx, contentLen-1)
+					if next, err := sjson.SetBytes(out, path+".type", "ephemeral"); err == nil {
+						out = next
+					}
+					if next, err := sjson.SetBytes(out, path+".ttl", "1h"); err == nil {
+						out = next
+					}
+				}
+			}
+		}
+	}
+
+	return out
+}
+
 // enforceCacheControlLimit 强制执行 cache_control 块数量限制（最多 4 个）
 // 超限时优先从 messages 中移除 cache_control，保护 system 中的缓存控制
 func enforceCacheControlLimit(body []byte) []byte {
@@ -4202,6 +4294,12 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		}
 
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
+
+		// Inject cache_control markers to match real CLI prompt-caching
+		// behaviour. Must run after system rewrite (which sets the
+		// [billing, banner, client...] layout) and before
+		// enforceCacheControlLimit (which caps to 4 blocks).
+		body = ensureMimicCacheControl(body, reqModel)
 	}
 
 	// 强制执行 cache_control 块数量限制（最多 4 个）
