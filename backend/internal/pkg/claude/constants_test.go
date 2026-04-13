@@ -8,7 +8,7 @@ import (
 )
 
 // TestBuildMessageBetaTokens_OpusMatchesCapture00037 pins the beta token list
-// against the real claude-cli/2.1.101 capture (capture/raw/00037), which is
+// against the real claude-cli/2.1.104 capture (capture/raw/00031), which is
 // an opus-4-6 main message with 10 tools and output_config.effort=medium.
 //
 // Real wire value (from capture):
@@ -128,12 +128,12 @@ func TestBuildMessageBetaTokens_APIKeyVariant(t *testing.T) {
 	require.Contains(t, got, BetaClaudeCode)
 }
 
-// TestDefaultHeaders_Version101 pins the default User-Agent to 2.1.101
+// TestDefaultHeaders_Version104 pins the default User-Agent to 2.1.104
 // so a future accidental downgrade is caught.
-func TestDefaultHeaders_Version101(t *testing.T) {
+func TestDefaultHeaders_Version104(t *testing.T) {
 	ua := DefaultHeaders["User-Agent"]
-	require.True(t, strings.Contains(ua, "2.1.101"),
-		"User-Agent should advertise 2.1.101, got %q", ua)
+	require.True(t, strings.Contains(ua, "2.1.104"),
+		"User-Agent should advertise 2.1.104, got %q", ua)
 	require.True(t, strings.Contains(ua, "(external, cli)"),
 		"User-Agent should keep the (external, cli) suffix, got %q", ua)
 }

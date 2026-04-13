@@ -54,20 +54,21 @@ const (
 	// placeholder is rewritten in two passes downstream:
 	//
 	//	1. syncBillingHeaderVersion (gateway_billing_header.go) replaces the
-	//	   "2.1.101" portion with the cc_version extracted from the account's
-	//	   fingerprint UA, leaving the ".8aa" build suffix intact (the regex
-	//	   only matches X.Y.Z so trailing ".8aa" survives).
+	//	   "2.1.104" portion with the cc_version extracted from the account's
+	//	   fingerprint UA, leaving the ".662" build suffix intact (the regex
+	//	   only matches X.Y.Z so trailing ".662" survives).
 	//	2. signBillingHeaderCCH replaces "cch=00000" with the xxHash64 signature
 	//	   of the finalized request body.
 	//
-	// Real claude-cli/2.1.101 (capture/raw/00037) sends this block as system[0]
-	// with NO cache_control. The ".8aa" build suffix is the build identifier
-	// for claude-cli 2.1.101 observed on the wire. NOTE: build suffix is
-	// version-specific — earlier captures (cap 011/012, claude-cli/2.1.100)
-	// used ".f22". When bumping to a new CLI version, this suffix MUST be
-	// re-captured because cc_version=A.B.C.<wrong-suffix> is an invalid
-	// combination Anthropic can detect.
-	claudeCodeBillingHeaderText = "x-anthropic-billing-header: cc_version=2.1.101.8aa; cc_entrypoint=cli; cch=00000;"
+	// Real claude-cli/2.1.104 (capture/raw/00031) sends this block as system[0]
+	// with NO cache_control. The ".662" build suffix is the build identifier
+	// for claude-cli 2.1.104 observed on the wire (capture/raw/00031).
+	// NOTE: build suffix is version-specific — earlier captures used
+	// ".8aa" (2.1.101) and ".f22" (2.1.100). When bumping to a new CLI
+	// version, this suffix MUST be re-captured because
+	// cc_version=A.B.C.<wrong-suffix> is an invalid combination
+	// Anthropic can detect.
+	claudeCodeBillingHeaderText = "x-anthropic-billing-header: cc_version=2.1.104.662; cc_entrypoint=cli; cch=00000;"
 
 	maxCacheControlBlocks = 4 // Anthropic API 允许的最大 cache_control 块数量
 
@@ -5838,9 +5839,9 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
 			// Build the required beta token list dynamically per request type to
-			// mirror real claude-cli/2.1.101 traffic (capture/raw/00037 for opus,
+			// mirror real claude-cli/2.1.104 traffic (capture/raw/00031 for opus,
 			// capture/011 for haiku). Order and content are anchored to those
-			// captures including the new tokens advertised by 2.1.101: context-1m,
+			// captures including the new tokens advertised by 2.1.101+: context-1m,
 			// advanced-tool-use, effort.
 			requiredBetas := claude.BuildMessageBetaTokens(claude.MessageBetaRequestKind{
 				ModelID:           modelID,
@@ -6009,7 +6010,7 @@ func bodyHasStructuredOutput(body []byte) bool {
 }
 
 // bodyHasEffort reports whether the request body carries an
-// output_config.effort field. Real claude-cli/2.1.101 (capture/raw/00037)
+// output_config.effort field. Real claude-cli/2.1.104 (capture/raw/00031)
 // emits the effort-2025-11-24 beta only when this field is set.
 func bodyHasEffort(body []byte) bool {
 	if len(body) == 0 {

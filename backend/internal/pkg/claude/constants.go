@@ -63,7 +63,7 @@ const APIKeyHaikuBetaHeader = BetaInterleavedThinking
 //
 // 抓包依据：
 //
-//	capture/raw/00037 (claude-cli/2.1.101, opus-4-6, has tools, has effort):
+//	capture/raw/00031 (claude-cli/2.1.104, opus-4-6, has tools, has effort):
 //	  claude-code, oauth, context-1m, interleaved-thinking, redact-thinking,
 //	  context-management, prompt-caching-scope, advisor-tool,
 //	  advanced-tool-use, effort
@@ -98,7 +98,7 @@ type MessageBetaRequestKind struct {
 // /v1/messages (or count_tokens) request, matching the dynamic per-request
 // pattern observed in real claude-cli traffic.
 //
-// Token order mirrors capture/raw/00037 (claude-cli/2.1.101 opus) for
+// Token order mirrors capture/raw/00031 (claude-cli/2.1.104 opus) for
 // non-haiku and capture/011 for haiku, so wire-level diff stays empty:
 //
 //	non-haiku: claude-code, oauth, context-1m, interleaved-thinking,
@@ -177,15 +177,15 @@ func BuildMessageBetaTokens(kind MessageBetaRequestKind) []string {
 }
 
 // DefaultHeaders 是 Claude Code 客户端默认请求头。
-// Values are aligned with claude-cli/2.1.101 captured traffic
-// (capture/raw/00037, body 74384 bytes, opus-4-6 main message). Keep
+// Values are aligned with claude-cli/2.1.104 captured traffic
+// (capture/raw/00031, body 74387 bytes, opus-4-6 main message). Keep
 // these in sync with recent Claude CLI traffic to reduce the chance
 // that Claude Code-scoped OAuth credentials are rejected as "non-CLI"
 // usage.
 //
-// X-Stainless-Package-Version stayed at 0.81.0 between 2.1.100 and 2.1.101.
+// X-Stainless-Package-Version stayed at 0.81.0 between 2.1.100 and 2.1.104.
 var DefaultHeaders = map[string]string{
-	"User-Agent":                                "claude-cli/2.1.101 (external, cli)",
+	"User-Agent":                                "claude-cli/2.1.104 (external, cli)",
 	"X-Stainless-Lang":                          "js",
 	"X-Stainless-Package-Version":               "0.81.0",
 	"X-Stainless-OS":                            "MacOS",
