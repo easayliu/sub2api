@@ -6016,14 +6016,8 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// Ensure x-client-request-id is always present on /v1/messages with a
-	// fresh per-request UUID. Real claude-cli/2.1.100 sends a distinct value
-	// on every request (cap 008 and cap 011 differ), and long-term absence
-	// is a stable negative fingerprint on the Anthropic side.
-	//
-	// Behaviour:
-	//   - client-supplied value via pass-through → preserved (real CC path)
-	//   - missing → generated (mimic path, or real CC that somehow dropped it)
+	// Always overwrite x-client-request-id with a fresh UUID regardless of
+	// what the client sent, to prevent client-side session correlation.
 	ensureClientRequestID(req)
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
@@ -9003,8 +8997,8 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// Inject a fresh x-client-request-id UUID if the client did not supply one,
-	// mirroring real claude-cli/2.1.100 (see buildUpstreamRequest for rationale).
+	// Always overwrite x-client-request-id with a fresh UUID regardless of
+	// what the client sent, to prevent client-side session correlation.
 	ensureClientRequestID(req)
 
 	if c != nil && tokenType == "oauth" {
@@ -9017,16 +9011,11 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	return req, nil
 }
 
-// ensureClientRequestID guarantees req carries an x-client-request-id header
-// with a valid UUID. If the client already sent one (via pass-through whitelist),
-// it is preserved; otherwise a fresh v4 UUID is generated. Real claude-cli
-// always sends this header with a per-request UUID (cap 008 and cap 011 use
-// different values), and its long-term absence is a stable negative fingerprint.
+// ensureClientRequestID always sets x-client-request-id to a fresh v4 UUID,
+// overwriting any client-supplied value. This prevents client-side session
+// correlation via a stable request ID.
 func ensureClientRequestID(req *http.Request) {
 	if req == nil {
-		return
-	}
-	if v := strings.TrimSpace(getHeaderRaw(req.Header, "x-client-request-id")); v != "" {
 		return
 	}
 	setHeaderRaw(req.Header, "x-client-request-id", uuid.NewString())
