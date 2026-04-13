@@ -5769,7 +5769,16 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			if !enableMPT {
 				accountUUID := account.GetExtraString("account_uuid")
 				if accountUUID != "" && fp.ClientID != "" {
-					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
+					// Real CC clients: use client's actual UA for metadata format
+					// selection so the user_id format matches the wire UA version.
+					// Mimic clients: use fingerprint UA (the normalized version).
+					rewriteUA := fp.UserAgent
+					if !mimicClaudeCode {
+						if clientUA := clientHeaders.Get("User-Agent"); clientUA != "" {
+							rewriteUA = clientUA
+						}
+					}
+					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, rewriteUA); err == nil && len(newBody) > 0 {
 						body = newBody
 					}
 				}
@@ -5777,8 +5786,11 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// 同步 billing header cc_version 与实际发送的 User-Agent 版本
-	if fingerprint != nil {
+	// 同步 billing header cc_version 与实际发送的 User-Agent 版本。
+	// Only for mimic path: real CC clients already send the correct
+	// cc_version in their billing header (or correctly omit it for
+	// older versions that predate the billing header feature).
+	if mimicClaudeCode && fingerprint != nil {
 		body = syncBillingHeaderVersion(body, fingerprint.UserAgent)
 	}
 	// CCH 签名：将 cch=00000 占位符替换为 xxHash64 签名（需在所有 body 修改之后）
@@ -5809,8 +5821,11 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// OAuth账号：应用缓存的指纹到请求头（覆盖白名单透传的头）
-	if fingerprint != nil {
+	// OAuth 账号：仅 mimic 路径覆盖请求头为指纹值。
+	// Real CC clients already send legitimate headers; overriding them
+	// would create a version mismatch (e.g. UA=2.1.104 but body/beta
+	// tokens reflect the client's actual older version).
+	if mimicClaudeCode && fingerprint != nil {
 		s.identityService.ApplyFingerprint(req, fingerprint)
 	}
 
@@ -8744,7 +8759,15 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 			if !ctEnableMPT {
 				accountUUID := account.GetExtraString("account_uuid")
 				if accountUUID != "" && fp.ClientID != "" {
-					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
+					// Real CC clients: use client's actual UA for metadata format
+					// selection; mimic clients: use fingerprint UA.
+					ctRewriteUA := fp.UserAgent
+					if !mimicClaudeCode {
+						if clientUA := clientHeaders.Get("User-Agent"); clientUA != "" {
+							ctRewriteUA = clientUA
+						}
+					}
+					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, ctRewriteUA); err == nil && len(newBody) > 0 {
 						body = newBody
 					}
 				}
@@ -8752,8 +8775,9 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// 同步 billing header cc_version 与实际发送的 User-Agent 版本
-	if ctFingerprint != nil && ctEnableFP {
+	// 同步 billing header cc_version 与实际发送的 User-Agent 版本。
+	// Only for mimic path: real CC clients already send the correct version.
+	if mimicClaudeCode && ctFingerprint != nil && ctEnableFP {
 		body = syncBillingHeaderVersion(body, ctFingerprint.UserAgent)
 	}
 	if ctEnableCCH {
@@ -8783,8 +8807,9 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// OAuth 账号：应用指纹到请求头（受设置开关控制）
-	if ctEnableFP && ctFingerprint != nil {
+	// OAuth 账号：仅 mimic 路径覆盖请求头为指纹值（受设置开关控制）。
+	// Real CC clients: headers are already legitimate, no override needed.
+	if mimicClaudeCode && ctEnableFP && ctFingerprint != nil {
 		s.identityService.ApplyFingerprint(req, ctFingerprint)
 	}
 
