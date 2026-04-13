@@ -5906,6 +5906,11 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	if enableCCH {
 		body = signBillingHeaderCCH(body)
 	}
+	// 真 CLI 客户端：body 经代理修改后 CCH 已失效，需重新签名。
+	// 幂等：若 body 未被修改，重签名结果与原值一致。
+	if !mimicClaudeCode {
+		body = resignBillingHeaderCCH(body)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -8885,6 +8890,9 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 	if ctEnableCCH {
 		body = signBillingHeaderCCH(body)
+	}
+	if !mimicClaudeCode {
+		body = resignBillingHeaderCCH(body)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))

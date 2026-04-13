@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/cespare/xxhash/v2"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -17,6 +18,9 @@ var ccVersionInBillingRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+`)
 // cchPlaceholderRe matches the cch=00000 placeholder in billing header text,
 // scoped to x-anthropic-billing-header to avoid touching user content.
 var cchPlaceholderRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcch=)(00000)(;)`)
+
+// cchAnyValueRe matches any 5-hex-char cch value in the billing header.
+var cchAnyValueRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcch=)([0-9a-f]{5})(;)`)
 
 const cchSeed uint64 = 0x6E52736AC806831E
 
@@ -63,6 +67,30 @@ func signBillingHeaderCCH(body []byte) []byte {
 	}
 	cch := fmt.Sprintf("%05x", xxHash64Seeded(body, cchSeed)&0xFFFFF)
 	return cchPlaceholderRe.ReplaceAll(body, []byte("${1}"+cch+"${3}"))
+}
+
+// resignBillingHeaderCCH re-signs the CCH for requests whose body was modified
+// after the client computed the original CCH. It resets the existing cch value
+// back to the 00000 placeholder, then recomputes via signBillingHeaderCCH.
+// No-op if the body has no billing header or cch is already 00000.
+func resignBillingHeaderCCH(body []byte) []byte {
+	m := cchAnyValueRe.FindSubmatch(body)
+	if m == nil {
+		return body
+	}
+	oldCCH := string(m[2])
+	if oldCCH == "00000" {
+		return signBillingHeaderCCH(body)
+	}
+	body = cchAnyValueRe.ReplaceAll(body, []byte("${1}00000${3}"))
+	body = signBillingHeaderCCH(body)
+	newM := cchAnyValueRe.FindSubmatch(body)
+	newCCH := ""
+	if newM != nil {
+		newCCH = string(newM[2])
+	}
+	logger.LegacyPrintf("service.gateway", "[BillingHeader] CCH re-signed: %s -> %s", oldCCH, newCCH)
+	return body
 }
 
 // xxHash64Seeded computes xxHash64 of data with a custom seed.

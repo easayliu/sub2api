@@ -128,6 +128,62 @@ func TestSignBillingHeaderCCH(t *testing.T) {
 	})
 }
 
+func TestResignBillingHeaderCCH(t *testing.T) {
+	t.Run("re-signs pre-computed CCH after body modification", func(t *testing.T) {
+		// Simulate: client computed cch on original body, then proxy modified body
+		original := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.104.e50; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+		signed := signBillingHeaderCCH(original)
+		billingText := gjson.GetBytes(signed, "system.0.text").String()
+		assert.NotContains(t, billingText, "cch=00000")
+
+		// Now re-sign — should produce the same value (body unchanged)
+		resigned := resignBillingHeaderCCH(signed)
+		resignedBilling := gjson.GetBytes(resigned, "system.0.text").String()
+		assert.Equal(t, billingText, resignedBilling)
+	})
+
+	t.Run("produces valid 5 hex-char cch", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.104.e50; cc_entrypoint=cli; cch=a0ff5;"}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+		result := resignBillingHeaderCCH(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.Regexp(t, `cch=[0-9a-f]{5};`, billingText)
+		assert.NotContains(t, billingText, "cch=a0ff5")
+	})
+
+	t.Run("idempotent - resign twice equals resign once", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.104.e50; cc_entrypoint=cli; cch=abcde;"}],"messages":[{"role":"user","content":"hi"}]}`)
+		r1 := resignBillingHeaderCCH(body)
+		r2 := resignBillingHeaderCCH(r1)
+		assert.Equal(t, string(r1), string(r2))
+	})
+
+	t.Run("no billing header - body unchanged", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"You are Claude Code."}],"messages":[]}`)
+		result := resignBillingHeaderCCH(body)
+		assert.Equal(t, string(body), string(result))
+	})
+
+	t.Run("cch=00000 placeholder - signs normally", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.104.e50; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hi"}]}`)
+		result := resignBillingHeaderCCH(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.NotContains(t, billingText, "cch=00000")
+		assert.Regexp(t, `cch=[0-9a-f]{5};`, billingText)
+	})
+
+	t.Run("matches reference: reset to 00000 then sign", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.104.e50; cc_entrypoint=cli; cch=12345;"}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+		// Manual: reset cch to 00000, then compute expected hash
+		resetBody := cchAnyValueRe.ReplaceAll(body, []byte("${1}00000${3}"))
+		expectedCCH := fmt.Sprintf("%05x", xxHash64Seeded(resetBody, cchSeed)&0xFFFFF)
+
+		result := resignBillingHeaderCCH(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.Contains(t, billingText, "cch="+expectedCCH+";")
+	})
+}
+
 func TestXXHash64Seeded(t *testing.T) {
 	t.Run("matches cespare/xxhash for seed 0", func(t *testing.T) {
 		inputs := []string{"", "a", "hello world", "The quick brown fox jumps over the lazy dog"}
