@@ -3837,116 +3837,125 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 	return result
 }
 
-// rewriteSystemForNonClaudeCode 将非 Claude Code 客户端的 system prompt 迁移至 messages，
-// system 字段仅保留 Claude Code 标识提示词。
-// Anthropic 基于 system 参数内容检测第三方应用，仅前置追加 Claude Code 提示词
-// 无法通过检测，因为后续内容仍为非 Claude Code 格式。
-// 策略：将原始 system prompt 提取并注入为 user/assistant 消息对，system 仅保留 Claude Code 标识。
+// rewriteSystemForNonClaudeCode rewrites a non-Claude-Code client's system
+// prompt to look like a real Claude Code request.
+//
+// Strategy: prepend [billing header, banner] to the system array and keep the
+// original system blocks as subsequent entries — exactly how real Claude Code
+// sends multi-block system payloads (capture/raw/00031 has 10+ system blocks).
+//
+// Previous approach injected the original system as a user/assistant message
+// pair ("[System Instructions]\n..." + "Understood. I will follow these
+// instructions."), which was a unique sub2api fingerprint easily detectable
+// by Anthropic via simple regex matching.
 func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 	system = normalizeSystemParam(system)
 
-	// 1. 提取原始 system prompt 文本
-	var originalSystemText string
-	switch v := system.(type) {
-	case string:
-		originalSystemText = strings.TrimSpace(v)
-	case []any:
-		var parts []string
-		for _, item := range v {
-			if m, ok := item.(map[string]any); ok {
-				if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
-					parts = append(parts, text)
-				}
-			}
-		}
-		originalSystemText = strings.Join(parts, "\n\n")
+	// Build the leading blocks: billing header + CC banner (no cache_control).
+	billingHeaderBlock, err := marshalAnthropicSystemTextBlock(claudeCodeBillingHeaderText, false)
+	if err != nil {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to build billing header block: %v", err)
+		return body
 	}
-
-	// 2. 将 system 替换为 [billing header, banner] 两个 text block，
-	//    与 capture/011 + capture/012 抓包到的真实 claude-cli/2.1.100 system 结构对齐：
-	//
-	//      system[0] = "x-anthropic-billing-header: cc_version=...; cc_entrypoint=cli; cch=...;"  无 cache_control
-	//      system[1] = "You are Claude Code, Anthropic's official CLI for Claude."                 无 cache_control
-	//
-	//    历史实现只产出单一 banner 块且带 cache_control: ephemeral，导致：
-	//      - syncBillingHeaderVersion / signBillingHeaderCCH 永远 no-op（找不到承载块）
-	//      - 每条 mimic 请求都缺 billing header，是稳定的"非 CC 客户端"指纹
-	//      - banner 上多余的 cache_control 也是与真实 CLI 不一致的指纹位
-	//
-	//    cc_version 中的 "2.1.100" 会被 syncBillingHeaderVersion 替换为指纹 UA 解析出的版本号，
-	//    ".f22" build 后缀因为正则只匹配 X.Y.Z 而被保留（与 cap 011/012 一致）。
-	//    "cch=00000" 占位符会被 signBillingHeaderCCH 用 xxHash64 签名替换。
-	mimicSystemBlocks := []map[string]any{
-		{
-			"type": "text",
-			"text": claudeCodeBillingHeaderText,
-		},
-		{
-			"type": "text",
-			"text": claudeCodeSystemPrompt,
-		},
-	}
-	out, ok := setJSONValueBytes(body, "system", mimicSystemBlocks)
-	if !ok {
-		logger.LegacyPrintf("service.gateway", "Warning: failed to set Claude Code system prompt")
+	claudeCodeBlock, err := marshalAnthropicSystemTextBlock(claudeCodeSystemPrompt, false)
+	if err != nil {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to build Claude Code prompt block: %v", err)
 		return body
 	}
 
-	// 3. 将原始 system prompt 作为 user/assistant 消息对注入到 messages 开头
-	//    模型仍通过 messages 接收完整指令，保留客户端功能
-	//
-	// 注意: 不要在此处再次用 hasClaudeCodePrefix 短路。
-	//
-	//   - 外层 Forward() 已经用 systemIncludesClaudeCodePrompt(parsed.System) 过滤掉了
-	//     "原 system 中已含 CC 前缀"的所有情况，正常路径下进入这里时
-	//     originalSystemText 不会以 CC 前缀开头。
-	//
-	//   - 但 Step 1 对 string 类型做了 strings.TrimSpace(v)，而外层
-	//     hasClaudeCodePrefix 直接用未 trim 的 v 调用 strings.HasPrefix。
-	//     当客户端发送形如 "  You are Claude Code, ...请翻译" (带前导空白
-	//     + CC 前缀 + 额外内容) 的 system 时:
-	//       1) 外层用未 trim 的 v 检测 → false → 进入 rewrite
-	//       2) Step 1 trim 后 originalSystemText 以 CC 前缀开头
-	//       3) 内层 hasClaudeCodePrefix(originalSystemText) → true → 错误短路
-	//       4) 用户的"...请翻译"指令被丢弃
-	//
-	//   只保留 ccPromptTrimmed 等值检查即可: 它阻止"原 system 完全等于 banner
-	//   本身"的退化情况注入毫无意义的 user/assistant 对。
-	ccPromptTrimmed := strings.TrimSpace(claudeCodeSystemPrompt)
-	if originalSystemText != "" && originalSystemText != ccPromptTrimmed {
-		instrMsg, err1 := json.Marshal(map[string]any{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "text", "text": "[System Instructions]\n" + originalSystemText},
-			},
-		})
-		ackMsg, err2 := json.Marshal(map[string]any{
-			"role": "assistant",
-			"content": []map[string]any{
-				{"type": "text", "text": "Understood. I will follow these instructions."},
-			},
-		})
-		if err1 != nil || err2 != nil {
-			logger.LegacyPrintf("service.gateway", "Warning: failed to marshal system-to-messages injection")
-			return out
-		}
+	// Opencode behavior: prefix the first non-empty client system block with
+	// the CC banner so that upstream concatenation still starts with the
+	// Claude Code identity signal.
+	claudeCodePrefix := strings.TrimSpace(claudeCodeSystemPrompt)
 
-		// 重建 messages 数组：[instruction, ack, ...originalMessages]
-		items := [][]byte{instrMsg, ackMsg}
-		messagesResult := gjson.GetBytes(out, "messages")
-		if messagesResult.IsArray() {
-			messagesResult.ForEach(func(_, msg gjson.Result) bool {
-				items = append(items, []byte(msg.Raw))
+	// Start with [billing header, banner]; append original system blocks after.
+	items := [][]byte{billingHeaderBlock, claudeCodeBlock}
+
+	switch v := system.(type) {
+	case nil:
+		// No client system — [billing header, banner] is sufficient.
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" || trimmed == claudeCodePrefix {
+			// Empty or already equals banner — nothing to append.
+		} else {
+			// Prefix the original text with CC banner (opencode behavior).
+			merged := v
+			if !strings.HasPrefix(v, claudeCodePrefix) {
+				merged = claudeCodePrefix + "\n\n" + v
+			}
+			nextBlock, buildErr := marshalAnthropicSystemTextBlock(merged, false)
+			if buildErr != nil {
+				logger.LegacyPrintf("service.gateway", "Warning: failed to build client system block: %v", buildErr)
+				return body
+			}
+			items = append(items, nextBlock)
+		}
+	case []any:
+		// Preserve original system blocks, skipping duplicates of the CC banner.
+		// Prefix the first non-empty text block with the CC banner (once).
+		prefixedNext := false
+		systemResult := gjson.GetBytes(body, "system")
+		if systemResult.IsArray() {
+			systemResult.ForEach(func(_, item gjson.Result) bool {
+				textResult := item.Get("text")
+				// Skip blocks that are exact duplicates of the CC banner.
+				if textResult.Exists() && textResult.Type == gjson.String &&
+					strings.TrimSpace(textResult.String()) == claudeCodePrefix {
+					return true
+				}
+
+				raw := []byte(item.Raw)
+				// Prefix the first text block once.
+				if !prefixedNext && item.Get("type").String() == "text" &&
+					textResult.Exists() && textResult.Type == gjson.String {
+					text := textResult.String()
+					if strings.TrimSpace(text) != "" && !strings.HasPrefix(text, claudeCodePrefix) {
+						next, setErr := sjson.SetBytes(raw, "text", claudeCodePrefix+"\n\n"+text)
+						if setErr == nil {
+							raw = next
+							prefixedNext = true
+						}
+					}
+				}
+				items = append(items, raw)
 				return true
 			})
-		}
-
-		if next, setOk := setJSONRawBytes(out, "messages", buildJSONArrayRaw(items)); setOk {
-			out = next
+		} else {
+			for _, item := range v {
+				m, ok := item.(map[string]any)
+				if !ok {
+					raw, marshalErr := json.Marshal(item)
+					if marshalErr == nil {
+						items = append(items, raw)
+					}
+					continue
+				}
+				if text, ok := m["text"].(string); ok && strings.TrimSpace(text) == claudeCodePrefix {
+					continue
+				}
+				if !prefixedNext {
+					if blockType, _ := m["type"].(string); blockType == "text" {
+						if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" && !strings.HasPrefix(text, claudeCodePrefix) {
+							m["text"] = claudeCodePrefix + "\n\n" + text
+							prefixedNext = true
+						}
+					}
+				}
+				raw, marshalErr := json.Marshal(m)
+				if marshalErr == nil {
+					items = append(items, raw)
+				}
+			}
 		}
 	}
 
-	return out
+	result, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw(items))
+	if !ok {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to inject Claude Code prompt")
+		return body
+	}
+	return result
 }
 
 type cacheControlPath struct {
@@ -4161,8 +4170,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
 
 	if shouldMimicClaudeCode {
-		// 非 Claude Code 客户端：将 system 替换为 Claude Code 标识，原始 system 迁移至 messages
-		// 条件：1) OAuth/SetupToken 账号  2) 不是 Claude Code 客户端  3) 不是 Haiku 模型  4) system 中还没有 Claude Code 提示词
+		// Non-Claude-Code client: prepend [billing header, banner] to system and
+		// keep original system blocks as subsequent entries (no message injection).
+		// Conditions: 1) OAuth account  2) not CC client  3) not Haiku  4) system lacks CC prefix
 		systemRewritten := false
 		if !strings.Contains(strings.ToLower(reqModel), "haiku") &&
 			!systemIncludesClaudeCodePrompt(parsed.System) {
@@ -4170,11 +4180,12 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			systemRewritten = true
 		}
 
-		// system 被重写时无需 strip：rewriteSystemForNonClaudeCode 产出的两个块
-		// （billing header + banner）本来就不带 cache_control，与 capture/011/012 一致；
-		// 客户端原 system 的 cache_control 跟随原文一起被迁移到 messages 中。
-		// 未重写时（haiku / 已含 CC 前缀）则需要剥离客户端 cache_control，与历史行为一致。
-		// 两种情况下 enforceCacheControlLimit 都会兜底处理 4 块上限。
+		// When rewritten: the leading [billing header, banner] blocks have no
+		// cache_control (matching capture/011/012); original client system
+		// blocks are preserved as-is including their cache_control if any.
+		// When not rewritten (haiku / already has CC prefix): strip client
+		// cache_control for historical consistency.
+		// enforceCacheControlLimit handles the 4-block cap in either case.
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: !systemRewritten}
 		if s.identityService != nil {
 			fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, c.Request.Header)

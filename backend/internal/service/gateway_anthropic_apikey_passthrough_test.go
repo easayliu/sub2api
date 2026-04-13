@@ -759,20 +759,15 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			require.Equal(t, "Bearer oauth-token", getHeaderRaw(upstream.lastReq.Header, "authorization"))
 			require.Contains(t, getHeaderRaw(upstream.lastReq.Header, "anthropic-beta"), claude.BetaOAuth)
 
-			// Mimic path produces a 2-block system: x-anthropic-billing-header
-			// placeholder + Claude Code banner (cap 011/012 structure). Neither
-			// block carries cache_control.
+			// Mimic path produces system = [billing header, banner, ...original blocks].
+			// The leading 2 blocks match cap 011/012 structure with no cache_control.
+			// Original client system content is preserved as subsequent blocks.
 			system := gjson.GetBytes(upstream.lastBody, "system")
 			require.True(t, system.Exists())
 			require.True(t, system.IsArray(), "system should be an array")
-			require.Len(t, system.Array(), 2, "system should have billing header + banner")
+			require.GreaterOrEqual(t, len(system.Array()), 2, "system should have at least billing header + banner")
 
-			// system[0]: billing header. signBillingHeaderCCH runs in production
-			// but is gated on enableCCH from settings, so the literal
-			// "cch=00000" placeholder is what we see in tests without that
-			// setting wired in. The cc_version part stays at the constant's
-			// "2.1.100" because syncBillingHeaderVersion needs a fingerprint
-			// UA to substitute it.
+			// system[0]: billing header placeholder (no cache_control)
 			require.Equal(t, claudeCodeBillingHeaderText, system.Array()[0].Get("text").String())
 			require.False(t, system.Array()[0].Get("cache_control").Exists(),
 				"billing header block must NOT have cache_control")
@@ -782,12 +777,9 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			require.False(t, system.Array()[1].Get("cache_control").Exists(),
 				"banner block must NOT have cache_control")
 
-			// 原始客户端 system 内容仍迁移至 messages 中
-			messages := gjson.GetBytes(upstream.lastBody, "messages")
-			require.True(t, messages.IsArray())
-			firstMsg := messages.Array()[0]
-			require.Equal(t, "user", firstMsg.Get("role").String())
-			require.Contains(t, firstMsg.Get("content.0.text").String(), "x-anthropic-billing-header keep")
+			// Original client system content preserved in system array (not messages)
+			require.Len(t, system.Array(), 3, "should have billing + banner + original content")
+			require.Contains(t, system.Array()[2].Get("text").String(), "x-anthropic-billing-header keep")
 		})
 	}
 }
