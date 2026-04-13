@@ -134,6 +134,6 @@ func TestDefaultHeaders_Version104(t *testing.T) {
 	ua := DefaultHeaders["User-Agent"]
 	require.True(t, strings.Contains(ua, "2.1.104"),
 		"User-Agent should advertise 2.1.104, got %q", ua)
-	require.True(t, strings.Contains(ua, "(external, cli)"),
-		"User-Agent should keep the (external, cli) suffix, got %q", ua)
+	require.True(t, strings.Contains(ua, "(external, claude-desktop)"),
+		"User-Agent should keep the (external, claude-desktop) suffix, got %q", ua)
 }

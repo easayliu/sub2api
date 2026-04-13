@@ -28,7 +28,7 @@ var (
 // Aligned with claude-cli/2.1.104 captured traffic (capture/raw/00031).
 // X-Stainless-Package-Version is unchanged from 2.1.100.
 var defaultFingerprint = Fingerprint{
-	UserAgent:               "claude-cli/2.1.104 (external, cli)",
+	UserAgent:               "claude-cli/2.1.104 (external, claude-desktop)",
 	StainlessLang:           "js",
 	StainlessPackageVersion: "0.81.0",
 	StainlessOS:             "MacOS",
