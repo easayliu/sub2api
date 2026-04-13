@@ -185,7 +185,7 @@ func BuildMessageBetaTokens(kind MessageBetaRequestKind) []string {
 //
 // X-Stainless-Package-Version stayed at 0.81.0 between 2.1.100 and 2.1.104.
 var DefaultHeaders = map[string]string{
-	"User-Agent":                                "claude-cli/2.1.104 (external, cli)",
+	"User-Agent":                                "claude-cli/2.1.104 (external, claude-desktop)",
 	"X-Stainless-Lang":                          "js",
 	"X-Stainless-Package-Version":               "0.81.0",
 	"X-Stainless-OS":                            "MacOS",
@@ -194,7 +194,7 @@ var DefaultHeaders = map[string]string{
 	"X-Stainless-Runtime-Version":               "v24.3.0",
 	"X-Stainless-Retry-Count":                   "0",
 	"X-Stainless-Timeout":                       "600",
-	"X-App":                                     "cli",
+	"X-App":                                     "claude-desktop",
 	"Anthropic-Dangerous-Direct-Browser-Access": "true",
 }
 

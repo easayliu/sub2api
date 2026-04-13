@@ -68,7 +68,7 @@ const (
 	// version, this suffix MUST be re-captured because
 	// cc_version=A.B.C.<wrong-suffix> is an invalid combination
 	// Anthropic can detect.
-	claudeCodeBillingHeaderText = "x-anthropic-billing-header: cc_version=2.1.104.662; cc_entrypoint=cli; cch=00000;"
+	claudeCodeBillingHeaderText = "x-anthropic-billing-header: cc_version=2.1.104.662; cc_entrypoint=claude-desktop; cch=00000;"
 
 	maxCacheControlBlocks = 4 // Anthropic API 允许的最大 cache_control 块数量
 
