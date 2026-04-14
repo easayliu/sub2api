@@ -3732,10 +3732,11 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 
 // rewriteSystemForNonClaudeCode 将非 Claude Code 客户端的 system 字段重组为
 // 直连 CLI 抓包的 3 块结构：
-//   [0] x-anthropic-billing-header（cc_version 由 syncBillingHeaderVersion 后置同步，
-//       cch 固定 00000 占位）— 无 cache_control
-//   [1] Claude Code banner — 无 cache_control
-//   [2] 客户端原始 system 文本（若有）— 带 cache_control {ephemeral, ttl=1h, scope=global}
+//
+//	[0] x-anthropic-billing-header（cc_version 由 syncBillingHeaderVersion 后置同步，
+//	    cch 固定 00000 占位）— 无 cache_control
+//	[1] Claude Code banner — 无 cache_control
+//	[2] 客户端原始 system 文本（若有）— 带 cache_control {ephemeral, ttl=1h, scope=global}
 //
 // messages 不再插入 [System Instructions]/ack 伪对话，避免在消息层留下第三方特征。
 func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {

@@ -7,6 +7,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func ccOf(t *testing.T, block any) map[string]any {
+	t.Helper()
+	m, ok := block.(map[string]any)
+	require.True(t, ok, "expected block to be map[string]any")
+	cc, ok := m["cache_control"].(map[string]any)
+	require.True(t, ok, "expected cache_control to be map[string]any")
+	return cc
+}
+
 func TestUpgradeCLICacheTTL(t *testing.T) {
 	tests := []struct {
 		name string
@@ -28,19 +37,20 @@ func TestUpgradeCLICacheTTL(t *testing.T) {
 				require.Len(t, system, 3)
 
 				// Block 0: billing header, no cc -> unchanged.
-				b0 := system[0].(map[string]any)
+				b0, ok := system[0].(map[string]any)
+				require.True(t, ok)
 				_, hasCC := b0["cache_control"]
 				require.False(t, hasCC)
 
 				// Block 1: Claude Code banner -> ttl:"1h", no scope.
-				b1cc := system[1].(map[string]any)["cache_control"].(map[string]any)
+				b1cc := ccOf(t, system[1])
 				require.Equal(t, "ephemeral", b1cc["type"])
 				require.Equal(t, "1h", b1cc["ttl"])
 				_, hasScope := b1cc["scope"]
 				require.False(t, hasScope)
 
 				// Block 2: agent instructions -> ttl:"1h" AND scope:"global".
-				b2cc := system[2].(map[string]any)["cache_control"].(map[string]any)
+				b2cc := ccOf(t, system[2])
 				require.Equal(t, "ephemeral", b2cc["type"])
 				require.Equal(t, "1h", b2cc["ttl"])
 				require.Equal(t, "global", b2cc["scope"])
@@ -54,7 +64,7 @@ func TestUpgradeCLICacheTTL(t *testing.T) {
 				]
 			}`,
 			assertSystem: func(t *testing.T, system []any) {
-				cc := system[0].(map[string]any)["cache_control"].(map[string]any)
+				cc := ccOf(t, system[0])
 				require.Equal(t, "global", cc["scope"])
 				require.Equal(t, "1h", cc["ttl"])
 			},
@@ -67,7 +77,7 @@ func TestUpgradeCLICacheTTL(t *testing.T) {
 				]
 			}`,
 			assertSystem: func(t *testing.T, system []any) {
-				cc := system[0].(map[string]any)["cache_control"].(map[string]any)
+				cc := ccOf(t, system[0])
 				require.Equal(t, "5m", cc["ttl"])
 				_, hasScope := cc["scope"]
 				require.False(t, hasScope)
@@ -84,8 +94,11 @@ func TestUpgradeCLICacheTTL(t *testing.T) {
 				]
 			}`,
 			assertMessages: func(t *testing.T, messages []any) {
-				content := messages[0].(map[string]any)["content"].([]any)
-				cc := content[1].(map[string]any)["cache_control"].(map[string]any)
+				msg, ok := messages[0].(map[string]any)
+				require.True(t, ok)
+				content, ok := msg["content"].([]any)
+				require.True(t, ok)
+				cc := ccOf(t, content[1])
 				require.Equal(t, "1h", cc["ttl"])
 			},
 		},
@@ -97,7 +110,9 @@ func TestUpgradeCLICacheTTL(t *testing.T) {
 				]
 			}`,
 			assertSystem: func(t *testing.T, system []any) {
-				_, hasCC := system[0].(map[string]any)["cache_control"]
+				block, ok := system[0].(map[string]any)
+				require.True(t, ok)
+				_, hasCC := block["cache_control"]
 				require.False(t, hasCC)
 			},
 		},
