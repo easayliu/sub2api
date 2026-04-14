@@ -9,7 +9,7 @@ import (
 // Go 的 HTTP server 解析请求时会将所有 header key 转为 Canonical 形式（如 x-app → X-App），
 // 此 map 用于在转发时恢复到真实的 wire format。
 //
-// 来源：对真实 Claude CLI (claude-cli/2.1.81) 到 api.anthropic.com 的 HTTPS 流量抓包。
+// 来源：对真实 Claude CLI (claude-cli/2.1.104) 到 api.anthropic.com 的 HTTPS 流量抓包。
 var headerWireCasing = map[string]string{
 	// Title case
 	"accept":     "Accept",

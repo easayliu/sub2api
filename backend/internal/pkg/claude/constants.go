@@ -12,6 +12,11 @@ const (
 	BetaTokenCounting            = "token-counting-2024-11-01"
 	BetaContext1M                = "context-1m-2025-08-07"
 	BetaFastMode                 = "fast-mode-2026-02-01"
+	// Modern Claude CLI (2.1.104+) unconditional beta tokens observed in captures.
+	// Added to mimic requests so non-CLI OAuth traffic matches current CLI beta set.
+	BetaAdvancedToolUse = "advanced-tool-use-2025-11-20"
+	BetaAdvisorTool     = "advisor-tool-2026-03-01"
+	BetaEffort          = "effort-2025-11-24"
 )
 
 // DroppedBetas 是转发时需要从 anthropic-beta header 中移除的 beta token 列表。
@@ -48,13 +53,13 @@ const APIKeyHaikuBetaHeader = BetaInterleavedThinking
 var DefaultHeaders = map[string]string{
 	// Keep these in sync with recent Claude CLI traffic to reduce the chance
 	// that Claude Code-scoped OAuth credentials are rejected as "non-CLI" usage.
-	"User-Agent":                                "claude-cli/2.1.22 (external, cli)",
+	"User-Agent":                                "claude-cli/2.1.104 (external, cli)",
 	"X-Stainless-Lang":                          "js",
-	"X-Stainless-Package-Version":               "0.70.0",
-	"X-Stainless-OS":                            "Linux",
+	"X-Stainless-Package-Version":               "0.81.0",
+	"X-Stainless-OS":                            "MacOS",
 	"X-Stainless-Arch":                          "arm64",
 	"X-Stainless-Runtime":                       "node",
-	"X-Stainless-Runtime-Version":               "v24.13.0",
+	"X-Stainless-Runtime-Version":               "v24.3.0",
 	"X-Stainless-Retry-Count":                   "0",
 	"X-Stainless-Timeout":                       "600",
 	"X-App":                                     "cli",

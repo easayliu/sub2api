@@ -5650,7 +5650,17 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			// Haiku models are exempt from third-party detection and don't need it.
 			requiredBetas := []string{claude.BetaOAuth, claude.BetaInterleavedThinking}
 			if !strings.Contains(strings.ToLower(modelID), "haiku") {
-				requiredBetas = []string{claude.BetaClaudeCode, claude.BetaOAuth, claude.BetaInterleavedThinking}
+				// Align with modern Claude CLI (2.1.104+) beta set to reduce
+				// cross-validation risk where UA claims new CLI but beta set looks old.
+				requiredBetas = []string{
+					claude.BetaClaudeCode,
+					claude.BetaOAuth,
+					claude.BetaInterleavedThinking,
+					claude.BetaContext1M,
+					claude.BetaAdvancedToolUse,
+					claude.BetaAdvisorTool,
+					claude.BetaEffort,
+				}
 			}
 			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
 		} else {
