@@ -5039,6 +5039,12 @@ func (s *GatewayService) parseSSEUsagePassthrough(data string, usage *ClaudeUsag
 
 			cc5m := deltaUsage.Get("cache_creation.ephemeral_5m_input_tokens")
 			cc1h := deltaUsage.Get("cache_creation.ephemeral_1h_input_tokens")
+			// Fallback: message_delta may expose ephemeral breakdown only under
+			// iterations[0].cache_creation when the top-level object is absent.
+			if !cc5m.Exists() && !cc1h.Exists() {
+				cc5m = deltaUsage.Get("iterations.0.cache_creation.ephemeral_5m_input_tokens")
+				cc1h = deltaUsage.Get("iterations.0.cache_creation.ephemeral_1h_input_tokens")
+			}
 			if cc5m.Exists() && cc5m.Int() > 0 {
 				usage.CacheCreation5mTokens = int(cc5m.Int())
 			}
