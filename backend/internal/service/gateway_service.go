@@ -48,7 +48,13 @@ const (
 	// to match real Claude CLI traffic as closely as possible. When we need a visual
 	// separator between system blocks, we add "\n\n" at concatenation time.
 	claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
-	maxCacheControlBlocks  = 4 // Anthropic API 允许的最大 cache_control 块数量
+	// Canonical opening of the Claude Code agent-instructions system block.
+	// Direct-to-Anthropic CLI traffic puts cache_control {ttl:"1h", scope:"global"}
+	// exclusively on this block; apiurl traffic downgrades to {type:"ephemeral"}.
+	// Matched on the leading text (with leading whitespace/newlines trimmed) so it
+	// still hits when the CLI merges "# Text output" into the same block.
+	cliAgentInstructionsPrefix = "You are an interactive agent that helps users with software engineering tasks"
+	maxCacheControlBlocks      = 4 // Anthropic API 允许的最大 cache_control 块数量
 
 	defaultUserGroupRateCacheTTL = 30 * time.Second
 	defaultModelsListCacheTTL    = 15 * time.Second
@@ -3931,6 +3937,76 @@ func enforceCacheControlLimit(body []byte) []byte {
 	return body
 }
 
+// upgradeCLICacheTTL aligns apiurl-routed CLI traffic with direct-to-Anthropic CLI
+// traffic: the CLI silently downgrades cache_control to a bare {type:"ephemeral"}
+// (5m default) when the endpoint isn't api.anthropic.com, so we upgrade those
+// entries to ttl:"1h" and re-attach scope:"global" to the Claude Code
+// agent-instructions system block (the only block direct traffic marks as global).
+// Blocks that already carry an explicit ttl are left untouched.
+func upgradeCLICacheTTL(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	out := body
+	modified := false
+
+	if system := gjson.GetBytes(out, "system"); system.IsArray() {
+		index := 0
+		system.ForEach(func(_, item gjson.Result) bool {
+			idx := index
+			index++
+			cc := item.Get("cache_control")
+			if !cc.Exists() || cc.Get("type").String() != "ephemeral" || cc.Get("ttl").Exists() {
+				return true
+			}
+			text := item.Get("text").String()
+			newCC := map[string]any{"type": "ephemeral", "ttl": "1h"}
+			if strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), cliAgentInstructionsPrefix) {
+				newCC["scope"] = "global"
+			}
+			if next, ok := setJSONValueBytes(out, fmt.Sprintf("system.%d.cache_control", idx), newCC); ok {
+				out = next
+				modified = true
+			}
+			return true
+		})
+	}
+
+	if messages := gjson.GetBytes(out, "messages"); messages.IsArray() {
+		msgIdx := 0
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			curMsg := msgIdx
+			msgIdx++
+			content := msg.Get("content")
+			if !content.IsArray() {
+				return true
+			}
+			contentIdx := 0
+			content.ForEach(func(_, part gjson.Result) bool {
+				curPart := contentIdx
+				contentIdx++
+				cc := part.Get("cache_control")
+				if !cc.Exists() || cc.Get("type").String() != "ephemeral" || cc.Get("ttl").Exists() {
+					return true
+				}
+				path := fmt.Sprintf("messages.%d.content.%d.cache_control", curMsg, curPart)
+				if next, ok := setJSONValueBytes(out, path, map[string]any{"type": "ephemeral", "ttl": "1h"}); ok {
+					out = next
+					modified = true
+				}
+				return true
+			})
+			return true
+		})
+	}
+
+	if !modified {
+		return body
+	}
+	return out
+}
+
 // Forward 转发请求到Claude API
 func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, parsed *ParsedRequest) (*ForwardResult, error) {
 	startTime := time.Now()
@@ -4022,6 +4098,15 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		}
 
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
+	}
+
+	// Align cache_control ttl with direct-CLI traffic. CLI 2.1.107 downgrades
+	// to bare {type:"ephemeral"} when routing through a non-Anthropic endpoint;
+	// upgrade back to ttl:"1h" (+ scope:"global" on the agent-instructions block)
+	// so OAuth accounts see the same cache behavior regardless of endpoint.
+	// Covers both real Claude Code and mimic clients since both downgrade.
+	if account.IsOAuth() {
+		body = upgradeCLICacheTTL(body)
 	}
 
 	// 强制执行 cache_control 块数量限制（最多 4 个）
