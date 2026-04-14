@@ -265,10 +265,11 @@ func TestInjectClaudeCodePrompt(t *testing.T) {
 			require.Equal(t, tt.wantFirstText, first["text"])
 			require.Equal(t, "text", first["type"])
 
-			// Check cache_control
+			// Check cache_control (CLI 2.1.107 emits ttl:"1h" on every system block)
 			cc, ok := first["cache_control"].(map[string]any)
 			require.True(t, ok)
 			require.Equal(t, "ephemeral", cc["type"])
+			require.Equal(t, "1h", cc["ttl"])
 
 			if tt.wantSecondText != "" && len(system) > 1 {
 				second, ok := system[1].(map[string]any)
@@ -378,7 +379,7 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			err := json.Unmarshal(result, &parsed)
 			require.NoError(t, err)
 
-			// system 应为 array 格式: [{type: "text", text: "...", cache_control: {type: "ephemeral"}}]
+			// system 应为 array 格式: [{type: "text", text: "...", cache_control: {type: "ephemeral", ttl: "1h"}}]
 			systemArr, ok := parsed["system"].([]any)
 			require.True(t, ok, "system should be an array, got %T", parsed["system"])
 			require.Len(t, systemArr, 1, "system array should have exactly 1 block")
@@ -389,6 +390,7 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			cc, ok := systemBlock["cache_control"].(map[string]any)
 			require.True(t, ok, "system block should have cache_control")
 			require.Equal(t, "ephemeral", cc["type"])
+			require.Equal(t, "1h", cc["ttl"])
 
 			// 检查 messages
 			messages, ok := parsed["messages"].([]any)

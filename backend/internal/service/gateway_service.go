@@ -855,6 +855,7 @@ func (s *GatewayService) hashContent(content string) string {
 
 type anthropicCacheControlPayload struct {
 	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 type anthropicSystemTextBlockPayload struct {
@@ -903,7 +904,10 @@ func marshalAnthropicSystemTextBlock(text string, includeCacheControl bool) ([]b
 		Text: text,
 	}
 	if includeCacheControl {
-		block.CacheControl = &anthropicCacheControlPayload{Type: "ephemeral"}
+		// Match CLI 2.1.107 direct traffic: every system text block carries
+		// ttl:"1h". Without prompt-caching-scope-2026-01-05 beta the ttl
+		// field is ignored by upstream, which is a no-op fallback.
+		block.CacheControl = &anthropicCacheControlPayload{Type: "ephemeral", TTL: "1h"}
 	}
 	return json.Marshal(block)
 }
@@ -3745,13 +3749,13 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 	}
 
 	// 2. 将 system 替换为 Claude Code 标准提示词（array 格式，与真实 Claude Code 一致）
-	//    真实 Claude Code 始终以 [{type: "text", text: "...", cache_control: {type: "ephemeral"}}] 发送 system。
+	//    真实 Claude Code 始终以 [{type: "text", text: "...", cache_control: {type: "ephemeral", ttl: "1h"}}] 发送 system。
 	//    使用 string 格式会被 Anthropic 检测为第三方应用。
 	claudeCodeSystemBlock := []map[string]any{
 		{
 			"type":          "text",
 			"text":          claudeCodeSystemPrompt,
-			"cache_control": map[string]string{"type": "ephemeral"},
+			"cache_control": map[string]string{"type": "ephemeral", "ttl": "1h"},
 		},
 	}
 	out, ok := setJSONValueBytes(body, "system", claudeCodeSystemBlock)
@@ -5654,7 +5658,15 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			// this as a legitimate Claude Code request; without it, the request is
 			// rejected as third-party ("out of extra usage").
 			// Haiku models are exempt from third-party detection and don't need it.
-			requiredBetas := []string{claude.BetaOAuth, claude.BetaInterleavedThinking}
+			// CLI 2.1.107 sends these on every /v1/messages call regardless of model;
+			// keep them required so apiurl traffic matches direct-CLI baseline.
+			requiredBetas := []string{
+				claude.BetaOAuth,
+				claude.BetaInterleavedThinking,
+				claude.BetaRedactThinking,
+				claude.BetaContextManagement,
+				claude.BetaPromptCachingScope,
+			}
 			if !strings.Contains(strings.ToLower(modelID), "haiku") {
 				// Align with modern Claude CLI (2.1.104+) beta set to reduce
 				// cross-validation risk where UA claims new CLI but beta set looks old.
@@ -5662,6 +5674,9 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 					claude.BetaClaudeCode,
 					claude.BetaOAuth,
 					claude.BetaInterleavedThinking,
+					claude.BetaRedactThinking,
+					claude.BetaContextManagement,
+					claude.BetaPromptCachingScope,
 					claude.BetaContext1M,
 					claude.BetaAdvancedToolUse,
 					claude.BetaAdvisorTool,

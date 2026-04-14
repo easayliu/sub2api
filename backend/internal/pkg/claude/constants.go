@@ -17,6 +17,11 @@ const (
 	BetaAdvancedToolUse = "advanced-tool-use-2025-11-20"
 	BetaAdvisorTool     = "advisor-tool-2026-03-01"
 	BetaEffort          = "effort-2025-11-24"
+	// Claude CLI 2.1.107 unconditional beta tokens on every /v1/messages call
+	// (both haiku and non-haiku). Required so apiurl traffic looks like direct CLI.
+	BetaRedactThinking     = "redact-thinking-2026-02-12"
+	BetaContextManagement  = "context-management-2025-06-27"
+	BetaPromptCachingScope = "prompt-caching-scope-2026-01-05"
 )
 
 // DroppedBetas 是转发时需要从 anthropic-beta header 中移除的 beta token 列表。
@@ -24,7 +29,11 @@ const (
 var DroppedBetas = []string{}
 
 // DefaultBetaHeader Claude Code 客户端默认的 anthropic-beta header
-const DefaultBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," + BetaFineGrainedToolStreaming
+// Aligned with CLI 2.1.107 baseline: drops fine-grained-tool-streaming (no longer
+// emitted by CLI) and adds the redact-thinking / context-management / prompt-caching-scope
+// tokens CLI now sends on every /v1/messages call.
+const DefaultBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," +
+	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope
 
 // MessageBetaHeaderNoTools /v1/messages 在无工具时的 beta header
 //
@@ -32,16 +41,22 @@ const DefaultBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleav
 // Claude Code for non-Claude-Code clients, we must include the claude-code beta
 // even if the request doesn't use tools, otherwise upstream may reject the
 // request as a non-Claude-Code API request.
-const MessageBetaHeaderNoTools = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking
+const MessageBetaHeaderNoTools = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," +
+	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope
 
 // MessageBetaHeaderWithTools /v1/messages 在有工具时的 beta header
-const MessageBetaHeaderWithTools = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking
+const MessageBetaHeaderWithTools = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," +
+	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope
 
 // CountTokensBetaHeader count_tokens 请求使用的 anthropic-beta header
 const CountTokensBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," + BetaTokenCounting
 
 // HaikuBetaHeader Haiku 模型使用的 anthropic-beta header（不需要 claude-code beta）
-const HaikuBetaHeader = BetaOAuth + "," + BetaInterleavedThinking
+// CLI 2.1.107 haiku traffic always carries the redact-thinking / context-management /
+// prompt-caching-scope trio; claude-code beta is optional (sometimes present on
+// agentic haiku calls, absent on quota/title-gen calls).
+const HaikuBetaHeader = BetaOAuth + "," + BetaInterleavedThinking + "," +
+	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope
 
 // APIKeyBetaHeader API-key 账号建议使用的 anthropic-beta header（不包含 oauth）
 const APIKeyBetaHeader = BetaClaudeCode + "," + BetaInterleavedThinking + "," + BetaFineGrainedToolStreaming
