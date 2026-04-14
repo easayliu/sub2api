@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestIsClaudeCodeClient(t *testing.T) {
@@ -281,93 +282,65 @@ func TestInjectClaudeCodePrompt(t *testing.T) {
 }
 
 func TestRewriteSystemForNonClaudeCode(t *testing.T) {
+	const billingHeaderText = "x-anthropic-billing-header: cc_version=2.1.107; cc_entrypoint=cli; cch=00000;"
+
 	tests := []struct {
-		name             string
-		body             string
-		system           any
-		wantSystemText   string // system array 第一个 block 的 text
-		wantMessagesLen  int    // messages 数组长度
-		wantFirstMsgRole string // 第一条消息的 role
-		wantFirstMsgText string // 第一条消息的 content[0].text
-		wantAckMsgText   string // 第二条消息的 content[0].text
+		name              string
+		body              string
+		system            any
+		wantBlock2Text    string // system[2].text 期望值；空表示用默认 CC agent prompt
+		wantBlock2Default bool   // system[2] 是否应等于 defaultClaudeCodeAgentPrompt
 	}{
 		{
-			name:            "nil system - no messages injected",
-			body:            `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:          nil,
-			wantSystemText:  claudeCodeSystemPrompt,
-			wantMessagesLen: 1, // 原始 1 条消息，不注入
+			name:              "nil system - block2 falls back to default agent prompt",
+			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:            nil,
+			wantBlock2Default: true,
 		},
 		{
-			name:            "empty string system - no messages injected",
-			body:            `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:          "",
-			wantSystemText:  claudeCodeSystemPrompt,
-			wantMessagesLen: 1,
+			name:              "empty string system - block2 falls back to default",
+			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:            "",
+			wantBlock2Default: true,
 		},
 		{
-			name:             "custom string system - migrated to messages",
-			body:             `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:           "You are a personal assistant running inside OpenClaw.",
-			wantSystemText:   claudeCodeSystemPrompt,
-			wantMessagesLen:  3, // instruction + ack + original
-			wantFirstMsgRole: "user",
-			wantFirstMsgText: "[System Instructions]\nYou are a personal assistant running inside OpenClaw.",
-			wantAckMsgText:   "Understood. I will follow these instructions.",
+			name:           "custom string system - kept in system[2]",
+			body:           `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:         "You are a personal assistant running inside OpenClaw.",
+			wantBlock2Text: "You are a personal assistant running inside OpenClaw.",
 		},
 		{
-			name:            "system equals Claude Code prompt - no messages injected",
-			body:            `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:          claudeCodeSystemPrompt,
-			wantSystemText:  claudeCodeSystemPrompt,
-			wantMessagesLen: 1,
+			name:              "system equals Claude Code banner - block2 falls back to default",
+			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:            claudeCodeSystemPrompt,
+			wantBlock2Default: true,
 		},
 		{
-			name: "array system with custom blocks - text joined and migrated",
+			name: "array system with custom blocks - joined into system[2]",
 			body: `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
 			system: []any{
 				map[string]any{"type": "text", "text": "First instruction"},
 				map[string]any{"type": "text", "text": "Second instruction"},
 			},
-			wantSystemText:   claudeCodeSystemPrompt,
-			wantMessagesLen:  3,
-			wantFirstMsgRole: "user",
-			wantFirstMsgText: "[System Instructions]\nFirst instruction\n\nSecond instruction",
-			wantAckMsgText:   "Understood. I will follow these instructions.",
+			wantBlock2Text: "First instruction\n\nSecond instruction",
 		},
 		{
-			name:            "empty array system - no messages injected",
-			body:            `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:          []any{},
-			wantSystemText:  claudeCodeSystemPrompt,
-			wantMessagesLen: 1,
+			name:              "empty array system - block2 falls back to default",
+			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:            []any{},
+			wantBlock2Default: true,
 		},
 		{
-			name:             "json.RawMessage string system",
-			body:             `{"model":"claude-3","system":"Custom prompt","messages":[{"role":"user","content":"hello"}]}`,
-			system:           json.RawMessage(`"Custom prompt"`),
-			wantSystemText:   claudeCodeSystemPrompt,
-			wantMessagesLen:  3,
-			wantFirstMsgRole: "user",
-			wantFirstMsgText: "[System Instructions]\nCustom prompt",
-			wantAckMsgText:   "Understood. I will follow these instructions.",
+			name:           "json.RawMessage string system",
+			body:           `{"model":"claude-3","system":"Custom prompt","messages":[{"role":"user","content":"hello"}]}`,
+			system:         json.RawMessage(`"Custom prompt"`),
+			wantBlock2Text: "Custom prompt",
 		},
 		{
-			name:            "json.RawMessage nil system",
-			body:            `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:          json.RawMessage(nil),
-			wantSystemText:  claudeCodeSystemPrompt,
-			wantMessagesLen: 1,
-		},
-		{
-			name:             "multiple original messages preserved",
-			body:             `{"model":"claude-3","messages":[{"role":"user","content":"msg1"},{"role":"assistant","content":"resp1"},{"role":"user","content":"msg2"}]}`,
-			system:           "Be helpful",
-			wantSystemText:   claudeCodeSystemPrompt,
-			wantMessagesLen:  5, // 2 injected + 3 original
-			wantFirstMsgRole: "user",
-			wantFirstMsgText: "[System Instructions]\nBe helpful",
-			wantAckMsgText:   "Understood. I will follow these instructions.",
+			name:              "json.RawMessage nil system - block2 falls back to default",
+			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:            json.RawMessage(nil),
+			wantBlock2Default: true,
 		},
 	}
 
@@ -379,49 +352,116 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			err := json.Unmarshal(result, &parsed)
 			require.NoError(t, err)
 
-			// system 应为 array 格式: [{type: "text", text: "...", cache_control: {type: "ephemeral", ttl: "1h"}}]
 			systemArr, ok := parsed["system"].([]any)
 			require.True(t, ok, "system should be an array, got %T", parsed["system"])
-			require.Len(t, systemArr, 1, "system array should have exactly 1 block")
-			systemBlock, ok := systemArr[0].(map[string]any)
-			require.True(t, ok)
-			require.Equal(t, "text", systemBlock["type"])
-			require.Equal(t, tt.wantSystemText, systemBlock["text"])
-			cc, ok := systemBlock["cache_control"].(map[string]any)
-			require.True(t, ok, "system block should have cache_control")
+			require.Len(t, systemArr, 3, "system always has 3 blocks: billing + banner + agent prompt")
+
+			block0 := systemArr[0].(map[string]any)
+			require.Equal(t, "text", block0["type"])
+			require.Equal(t, billingHeaderText, block0["text"])
+			require.Nil(t, block0["cache_control"])
+
+			block1 := systemArr[1].(map[string]any)
+			require.Equal(t, "text", block1["type"])
+			require.Equal(t, claudeCodeSystemPrompt, block1["text"])
+			require.Nil(t, block1["cache_control"])
+
+			block2 := systemArr[2].(map[string]any)
+			require.Equal(t, "text", block2["type"])
+			if tt.wantBlock2Default {
+				require.Equal(t, defaultClaudeCodeAgentPrompt, block2["text"])
+			} else {
+				require.Equal(t, tt.wantBlock2Text, block2["text"])
+			}
+			cc, ok := block2["cache_control"].(map[string]any)
+			require.True(t, ok, "system[2] should have cache_control")
 			require.Equal(t, "ephemeral", cc["type"])
 			require.Equal(t, "1h", cc["ttl"])
+			require.Equal(t, "global", cc["scope"])
 
-			// 检查 messages
+			// 防回退：每个 block 的 JSON key 顺序必须 type→text(→cache_control)，scope 在 ttl 后
+			raw := string(result)
+			require.NotContains(t, raw, `{"cache_control"`, "block 不应以 cache_control 开头（字母序）")
+			require.NotContains(t, raw, `{"text"`, "block 不应以 text 开头")
+			require.Contains(t, raw, `"cache_control":{"type":"ephemeral","ttl":"1h","scope":"global"}`,
+				"cache_control 字段顺序必须 type→ttl→scope")
+
 			messages, ok := parsed["messages"].([]any)
 			require.True(t, ok, "messages should be an array")
-			require.Len(t, messages, tt.wantMessagesLen)
-
-			if tt.wantFirstMsgRole != "" && len(messages) >= 2 {
-				// 检查注入的 instruction 消息
-				firstMsg, ok := messages[0].(map[string]any)
-				require.True(t, ok)
-				require.Equal(t, tt.wantFirstMsgRole, firstMsg["role"])
-
-				firstContent, ok := firstMsg["content"].([]any)
-				require.True(t, ok)
-				require.Len(t, firstContent, 1)
-				firstBlock, ok := firstContent[0].(map[string]any)
-				require.True(t, ok)
-				require.Equal(t, tt.wantFirstMsgText, firstBlock["text"])
-
-				// 检查注入的 ack 消息
-				ackMsg, ok := messages[1].(map[string]any)
-				require.True(t, ok)
-				require.Equal(t, "assistant", ackMsg["role"])
-
-				ackContent, ok := ackMsg["content"].([]any)
-				require.True(t, ok)
-				require.Len(t, ackContent, 1)
-				ackBlock, ok := ackContent[0].(map[string]any)
-				require.True(t, ok)
-				require.Equal(t, tt.wantAckMsgText, ackBlock["text"])
-			}
+			var originalParsed map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tt.body), &originalParsed))
+			originalMessages := originalParsed["messages"].([]any)
+			require.Len(t, messages, len(originalMessages), "messages must not be mutated")
 		})
 	}
+}
+
+func TestMimicCLIMessages(t *testing.T) {
+	t.Run("string content wrapped to array + cache_control attached", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+		out := mimicCLIMessages(body)
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal(out, &parsed))
+
+		msgs := parsed["messages"].([]any)
+		require.Len(t, msgs, 1)
+		content := msgs[0].(map[string]any)["content"].([]any)
+		require.Len(t, content, 1)
+		block := content[0].(map[string]any)
+		require.Equal(t, "text", block["type"])
+		require.Equal(t, "hello", block["text"])
+		cc := block["cache_control"].(map[string]any)
+		require.Equal(t, "ephemeral", cc["type"])
+		require.Equal(t, "1h", cc["ttl"])
+
+		// 防回退：JSON key 必须按 CLI wire format 顺序输出，不能字母序
+		raw := string(out)
+		typePos := strings.Index(raw, `"type":"text"`)
+		textPos := strings.Index(raw, `"text":"hello"`)
+		ccPos := strings.Index(raw, `"cache_control"`)
+		require.True(t, typePos < textPos && textPos < ccPos,
+			"content block keys must be type→text→cache_control, got: %s", raw)
+		// cache_control 内部 type 必须先于 ttl
+		ccTypePos := strings.Index(raw, `"cache_control":{"type"`)
+		require.NotEqual(t, -1, ccTypePos, "cache_control must start with type, got: %s", raw)
+	})
+
+	t.Run("array content - cache_control on last text block", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"last"}]}]}`)
+		out := mimicCLIMessages(body)
+
+		content := gjson.GetBytes(out, "messages.0.content").Array()
+		require.Len(t, content, 2)
+		require.False(t, content[0].Get("cache_control").Exists())
+		require.Equal(t, "ephemeral", content[1].Get("cache_control.type").String())
+		require.Equal(t, "1h", content[1].Get("cache_control.ttl").String())
+	})
+
+	t.Run("multi-turn - cache_control only on LAST user's last text block", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":"q1"},{"role":"assistant","content":"a1"},{"role":"user","content":"q2"}]}`)
+		out := mimicCLIMessages(body)
+
+		require.False(t, gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists())
+		require.False(t, gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists())
+		require.Equal(t, "ephemeral", gjson.GetBytes(out, "messages.2.content.0.cache_control.type").String())
+	})
+
+	t.Run("idempotent: existing cache_control left alone", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]}`)
+		out := mimicCLIMessages(body)
+		require.Equal(t, "5m", gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").String())
+	})
+
+	t.Run("tool_result-only user message - skip cache_control", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}]}`)
+		out := mimicCLIMessages(body)
+		require.False(t, gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists())
+	})
+
+	t.Run("no messages - no-op", func(t *testing.T) {
+		body := []byte(`{"model":"claude-3"}`)
+		out := mimicCLIMessages(body)
+		require.Equal(t, string(body), string(out))
+	})
 }

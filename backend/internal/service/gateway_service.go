@@ -860,8 +860,9 @@ func (s *GatewayService) hashContent(content string) string {
 }
 
 type anthropicCacheControlPayload struct {
-	Type string `json:"type"`
-	TTL  string `json:"ttl,omitempty"`
+	Type  string `json:"type"`
+	TTL   string `json:"ttl,omitempty"`
+	Scope string `json:"scope,omitempty"`
 }
 
 type anthropicSystemTextBlockPayload struct {
@@ -3729,15 +3730,17 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 	return result
 }
 
-// rewriteSystemForNonClaudeCode 将非 Claude Code 客户端的 system prompt 迁移至 messages，
-// system 字段仅保留 Claude Code 标识提示词。
-// Anthropic 基于 system 参数内容检测第三方应用，仅前置追加 Claude Code 提示词
-// 无法通过检测，因为后续内容仍为非 Claude Code 格式。
-// 策略：将原始 system prompt 提取并注入为 user/assistant 消息对，system 仅保留 Claude Code 标识。
+// rewriteSystemForNonClaudeCode 将非 Claude Code 客户端的 system 字段重组为
+// 直连 CLI 抓包的 3 块结构：
+//   [0] x-anthropic-billing-header（cc_version 由 syncBillingHeaderVersion 后置同步，
+//       cch 固定 00000 占位）— 无 cache_control
+//   [1] Claude Code banner — 无 cache_control
+//   [2] 客户端原始 system 文本（若有）— 带 cache_control {ephemeral, ttl=1h, scope=global}
+//
+// messages 不再插入 [System Instructions]/ack 伪对话，避免在消息层留下第三方特征。
 func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 	system = normalizeSystemParam(system)
 
-	// 1. 提取原始 system prompt 文本
 	var originalSystemText string
 	switch v := system.(type) {
 	case string:
@@ -3754,58 +3757,99 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 		originalSystemText = strings.Join(parts, "\n\n")
 	}
 
-	// 2. 将 system 替换为 Claude Code 标准提示词（array 格式，与真实 Claude Code 一致）
-	//    真实 Claude Code 始终以 [{type: "text", text: "...", cache_control: {type: "ephemeral", ttl: "1h"}}] 发送 system。
-	//    使用 string 格式会被 Anthropic 检测为第三方应用。
-	claudeCodeSystemBlock := []map[string]any{
+	ccPromptTrimmed := strings.TrimSpace(claudeCodeSystemPrompt)
+	block2Text := originalSystemText
+	if block2Text == "" || block2Text == ccPromptTrimmed {
+		block2Text = defaultClaudeCodeAgentPrompt
+	}
+
+	blocks := []anthropicSystemTextBlockPayload{
 		{
-			"type":          "text",
-			"text":          claudeCodeSystemPrompt,
-			"cache_control": map[string]string{"type": "ephemeral", "ttl": "1h"},
+			Type: "text",
+			Text: "x-anthropic-billing-header: cc_version=2.1.107; cc_entrypoint=cli; cch=00000;",
+		},
+		{
+			Type: "text",
+			Text: claudeCodeSystemPrompt,
+		},
+		{
+			Type: "text",
+			Text: block2Text,
+			CacheControl: &anthropicCacheControlPayload{
+				Type:  "ephemeral",
+				TTL:   "1h",
+				Scope: "global",
+			},
 		},
 	}
-	out, ok := setJSONValueBytes(body, "system", claudeCodeSystemBlock)
+
+	out, ok := setJSONValueBytes(body, "system", blocks)
 	if !ok {
-		logger.LegacyPrintf("service.gateway", "Warning: failed to set Claude Code system prompt")
+		logger.LegacyPrintf("service.gateway", "Warning: failed to set Claude Code mimic system blocks")
+		return body
+	}
+	return out
+}
+
+// mimicCLIMessages aligns messages structure with direct-CLI traffic for non-CLI
+// clients: (1) wraps string-form content in [{type:"text", text:<str>}]; (2) ensures
+// the last text block of the last user message carries cache_control: ephemeral+ttl=1h
+// so prompt caching still kicks in. Tool-only / tool_result messages are left alone.
+func mimicCLIMessages(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
 		return body
 	}
 
-	// 3. 将原始 system prompt 作为 user/assistant 消息对注入到 messages 开头
-	//    模型仍通过 messages 接收完整指令，保留客户端功能
-	ccPromptTrimmed := strings.TrimSpace(claudeCodeSystemPrompt)
-	if originalSystemText != "" && originalSystemText != ccPromptTrimmed && !hasClaudeCodePrefix(originalSystemText) {
-		instrMsg, err1 := json.Marshal(map[string]any{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "text", "text": "[System Instructions]\n" + originalSystemText},
-			},
-		})
-		ackMsg, err2 := json.Marshal(map[string]any{
-			"role": "assistant",
-			"content": []map[string]any{
-				{"type": "text", "text": "Understood. I will follow these instructions."},
-			},
-		})
-		if err1 != nil || err2 != nil {
-			logger.LegacyPrintf("service.gateway", "Warning: failed to marshal system-to-messages injection")
-			return out
+	out := body
+	idx := 0
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		current := idx
+		idx++
+		content := msg.Get("content")
+		if content.Type == gjson.String {
+			wrapped := []anthropicSystemTextBlockPayload{{Type: "text", Text: content.String()}}
+			if next, ok := setJSONValueBytes(out, fmt.Sprintf("messages.%d.content", current), wrapped); ok {
+				out = next
+			}
 		}
+		return true
+	})
 
-		// 重建 messages 数组：[instruction, ack, ...originalMessages]
-		items := [][]byte{instrMsg, ackMsg}
-		messagesResult := gjson.GetBytes(out, "messages")
-		if messagesResult.IsArray() {
-			messagesResult.ForEach(func(_, msg gjson.Result) bool {
-				items = append(items, []byte(msg.Raw))
-				return true
-			})
-		}
-
-		if next, setOk := setJSONRawBytes(out, "messages", buildJSONArrayRaw(items)); setOk {
-			out = next
+	msgs := gjson.GetBytes(out, "messages").Array()
+	lastUserIdx := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Get("role").String() == "user" {
+			lastUserIdx = i
+			break
 		}
 	}
-
+	if lastUserIdx < 0 {
+		return out
+	}
+	content := msgs[lastUserIdx].Get("content")
+	if !content.IsArray() {
+		return out
+	}
+	contentArr := content.Array()
+	lastTextIdx := -1
+	for i := len(contentArr) - 1; i >= 0; i-- {
+		if contentArr[i].Get("type").String() == "text" && contentArr[i].Get("text").String() != "" {
+			lastTextIdx = i
+			break
+		}
+	}
+	if lastTextIdx < 0 {
+		return out
+	}
+	if contentArr[lastTextIdx].Get("cache_control").Exists() {
+		return out
+	}
+	cc := anthropicCacheControlPayload{Type: "ephemeral", TTL: "1h"}
+	path := fmt.Sprintf("messages.%d.content.%d.cache_control", lastUserIdx, lastTextIdx)
+	if next, ok := setJSONValueBytes(out, path, cc); ok {
+		out = next
+	}
 	return out
 }
 
@@ -3961,9 +4005,9 @@ func upgradeCLICacheTTL(body []byte) []byte {
 				return true
 			}
 			text := item.Get("text").String()
-			newCC := map[string]any{"type": "ephemeral", "ttl": "1h"}
+			newCC := anthropicCacheControlPayload{Type: "ephemeral", TTL: "1h"}
 			if strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), cliAgentInstructionsPrefix) {
-				newCC["scope"] = "global"
+				newCC.Scope = "global"
 			}
 			if next, ok := setJSONValueBytes(out, fmt.Sprintf("system.%d.cache_control", idx), newCC); ok {
 				out = next
@@ -3991,7 +4035,7 @@ func upgradeCLICacheTTL(body []byte) []byte {
 					return true
 				}
 				path := fmt.Sprintf("messages.%d.content.%d.cache_control", curMsg, curPart)
-				if next, ok := setJSONValueBytes(out, path, map[string]any{"type": "ephemeral", "ttl": "1h"}); ok {
+				if next, ok := setJSONValueBytes(out, path, anthropicCacheControlPayload{Type: "ephemeral", TTL: "1h"}); ok {
 					out = next
 					modified = true
 				}
@@ -4098,6 +4142,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		}
 
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
+		body = mimicCLIMessages(body)
 	}
 
 	// Align cache_control ttl with direct-CLI traffic. CLI 2.1.107 downgrades

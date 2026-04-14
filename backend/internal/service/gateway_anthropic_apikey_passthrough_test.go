@@ -762,15 +762,29 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			system := gjson.GetBytes(upstream.lastBody, "system")
 			require.True(t, system.Exists())
 			require.True(t, system.IsArray(), "system should be an array")
-			require.Equal(t, claudeCodeSystemPrompt, system.Array()[0].Get("text").String())
-			require.Equal(t, "ephemeral", system.Array()[0].Get("cache_control.type").String())
+			blocks := system.Array()
+			require.Len(t, blocks, 3, "system should have 3 blocks: billing + banner + user content")
 
-			// 原始 system prompt 应迁移至 messages 中
+			// system[0]: sub2api 注入的 billing header (无 cache_control)
+			require.Contains(t, blocks[0].Get("text").String(), "x-anthropic-billing-header:")
+			require.Contains(t, blocks[0].Get("text").String(), "cch=00000")
+			require.False(t, blocks[0].Get("cache_control").Exists())
+
+			// system[1]: Claude Code banner (无 cache_control)
+			require.Equal(t, claudeCodeSystemPrompt, blocks[1].Get("text").String())
+			require.False(t, blocks[1].Get("cache_control").Exists())
+
+			// system[2]: 客户端原始 system 文本 (带 cache_control + scope=global)
+			require.Contains(t, blocks[2].Get("text").String(), "x-anthropic-billing-header keep")
+			require.Equal(t, "ephemeral", blocks[2].Get("cache_control.type").String())
+			require.Equal(t, "1h", blocks[2].Get("cache_control.ttl").String())
+			require.Equal(t, "global", blocks[2].Get("cache_control.scope").String())
+
+			// messages 不应被改动：仍只有原始 1 条
 			messages := gjson.GetBytes(upstream.lastBody, "messages")
 			require.True(t, messages.IsArray())
-			firstMsg := messages.Array()[0]
-			require.Equal(t, "user", firstMsg.Get("role").String())
-			require.Contains(t, firstMsg.Get("content.0.text").String(), "x-anthropic-billing-header keep")
+			require.Len(t, messages.Array(), 1)
+			require.Equal(t, "hello", messages.Array()[0].Get("content.0.text").String())
 		})
 	}
 }
