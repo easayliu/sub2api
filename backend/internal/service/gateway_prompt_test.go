@@ -359,17 +359,20 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			require.Len(t, systemArr, 4,
 				"system always has 4 blocks: billing + banner + agent + env (matches CLI 2.1.107 capture)")
 
-			block0 := systemArr[0].(map[string]any)
+			block0, ok := systemArr[0].(map[string]any)
+			require.True(t, ok, "system[0] should be an object, got %T", systemArr[0])
 			require.Equal(t, "text", block0["type"])
 			require.Equal(t, billingHeaderText, block0["text"])
 			require.Nil(t, block0["cache_control"])
 
-			block1 := systemArr[1].(map[string]any)
+			block1, ok := systemArr[1].(map[string]any)
+			require.True(t, ok, "system[1] should be an object, got %T", systemArr[1])
 			require.Equal(t, "text", block1["type"])
 			require.Equal(t, claudeCodeSystemPrompt, block1["text"])
 			require.Nil(t, block1["cache_control"])
 
-			block2 := systemArr[2].(map[string]any)
+			block2, ok := systemArr[2].(map[string]any)
+			require.True(t, ok, "system[2] should be an object, got %T", systemArr[2])
 			require.Equal(t, "text", block2["type"])
 			if tt.wantBlock2Default {
 				require.Equal(t, defaultClaudeCodeAgentPrompt, block2["text"])
@@ -382,7 +385,8 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			require.Equal(t, "1h", cc["ttl"])
 			require.Equal(t, "global", cc["scope"])
 
-			block3 := systemArr[3].(map[string]any)
+			block3, ok := systemArr[3].(map[string]any)
+			require.True(t, ok, "system[3] should be an object, got %T", systemArr[3])
 			require.Equal(t, "text", block3["type"])
 			require.Equal(t, defaultClaudeCodeEnvPrompt, block3["text"])
 			require.Nil(t, block3["cache_control"],
