@@ -18,6 +18,10 @@ var ccVersionInBillingRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+`)
 // scoped to x-anthropic-billing-header to avoid touching user content.
 var cchPlaceholderRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcch=)(00000)(;)`)
 
+// cchAnyValueRe matches any 5-hex-char cch value in billing header text,
+// scoped to x-anthropic-billing-header to avoid touching user content.
+var cchAnyValueRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcch=)([0-9a-f]{5})(;)`)
+
 const cchSeed uint64 = 0x6E52736AC806831E
 
 // syncBillingHeaderVersion rewrites cc_version in x-anthropic-billing-header
@@ -63,6 +67,17 @@ func signBillingHeaderCCH(body []byte) []byte {
 	}
 	cch := fmt.Sprintf("%05x", xxHash64Seeded(body, cchSeed)&0xFFFFF)
 	return cchPlaceholderRe.ReplaceAll(body, []byte("${1}"+cch+"${3}"))
+}
+
+// resetBillingHeaderCCH forces any existing cch=xxxxx value in the billing
+// header back to the cch=00000 placeholder. Used when cch signing is disabled
+// so upstream receives a uniform placeholder regardless of whether the inbound
+// client was a real CLI (with its own signed cch) or a mimic client.
+func resetBillingHeaderCCH(body []byte) []byte {
+	if !cchAnyValueRe.Match(body) {
+		return body
+	}
+	return cchAnyValueRe.ReplaceAll(body, []byte("${1}00000${3}"))
 }
 
 // xxHash64Seeded computes xxHash64 of data with a custom seed.

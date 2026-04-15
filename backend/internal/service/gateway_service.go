@@ -5782,9 +5782,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	if syncUA != "" {
 		body = syncBillingHeaderVersion(body, syncUA)
 	}
-	// CCH 签名：将 cch=00000 占位符替换为 xxHash64 签名（需在所有 body 修改之后）
+	// CCH 签名：启用时对 body 计算 xxHash64 签名替换占位符；
+	// 关闭时强制把任意 cch=xxxxx 重置回 cch=00000（真 CLI 带来的真实签名也会被清掉），
+	// 以便上游始终收到统一的占位符。
 	if enableCCH {
 		body = signBillingHeaderCCH(body)
+	} else {
+		body = resetBillingHeaderCCH(body)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
@@ -8738,6 +8742,8 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 	if ctEnableCCH {
 		body = signBillingHeaderCCH(body)
+	} else {
+		body = resetBillingHeaderCCH(body)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))

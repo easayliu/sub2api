@@ -138,6 +138,45 @@ func TestSignBillingHeaderCCH(t *testing.T) {
 	})
 }
 
+func TestResetBillingHeaderCCH(t *testing.T) {
+	t.Run("resets real signed cch back to placeholder", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.107.c33; cc_entrypoint=cli; cch=a1b2c;"}],"messages":[]}`)
+		result := resetBillingHeaderCCH(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.Contains(t, billingText, "cch=00000;")
+		assert.NotContains(t, billingText, "cch=a1b2c")
+	})
+
+	t.Run("placeholder already - body unchanged", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.107; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`)
+		result := resetBillingHeaderCCH(body)
+		assert.Equal(t, string(body), string(result))
+	})
+
+	t.Run("no billing header - body unchanged", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"You are Claude Code."}],"messages":[]}`)
+		result := resetBillingHeaderCCH(body)
+		assert.Equal(t, string(body), string(result))
+	})
+
+	t.Run("literal cch in user content is not touched", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.107; cc_entrypoint=cli; cch=deadb;"}],"messages":[{"role":"user","content":[{"type":"text","text":"keep literal cch=cafe1 here"}]}]}`)
+		result := resetBillingHeaderCCH(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.Contains(t, billingText, "cch=00000;")
+		userText := gjson.GetBytes(result, "messages.0.content.0.text").String()
+		assert.Contains(t, userText, "cch=cafe1")
+	})
+
+	t.Run("sign then reset round-trip yields placeholder", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.a43; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+		signed := signBillingHeaderCCH(body)
+		require.NotContains(t, string(signed), "cch=00000")
+		reset := resetBillingHeaderCCH(signed)
+		assert.Contains(t, string(reset), "cch=00000;")
+	})
+}
+
 func TestXXHash64Seeded(t *testing.T) {
 	t.Run("matches cespare/xxhash for seed 0", func(t *testing.T) {
 		inputs := []string{"", "a", "hello world", "The quick brown fox jumps over the lazy dog"}
