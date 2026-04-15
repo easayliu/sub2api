@@ -1615,6 +1615,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
+			if !ok && s.debugModelRoutingEnabled() {
+				logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: not in schedulable snapshot",
+					shortSessionHash(sessionHash), accountID)
+			}
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定
 				// Check if the account needs sticky session cleanup
@@ -1622,26 +1626,46 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				if clearSticky {
 					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 				}
-				if !clearSticky && s.isAccountInGroup(account, groupID) &&
-					s.isAccountAllowedForPlatform(account, platform, useMixed) &&
-					(requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) &&
-					s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) &&
-					s.isAccountSchedulableForQuota(account) &&
-					s.isAccountSchedulableForWindowCost(ctx, account, true) &&
-
-					s.isAccountSchedulableForRPM(ctx, account, true) { // 粘性会话窗口费用+RPM 检查
+				g1 := s.isAccountInGroup(account, groupID)
+				g2 := s.isAccountAllowedForPlatform(account, platform, useMixed)
+				g3 := requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)
+				g4 := s.isAccountSchedulableForModelSelection(ctx, account, requestedModel)
+				g5 := s.isAccountSchedulableForQuota(account)
+				g6 := s.isAccountSchedulableForWindowCost(ctx, account, true)
+				g7 := s.isAccountSchedulableForRPM(ctx, account, true)
+				if s.debugModelRoutingEnabled() {
+					logger.LegacyPrintf("service.gateway",
+						"[StickyLayer1.5] session=%s account=%d clear=%v inGroup=%v platform=%v model=%v modelSel=%v quota=%v windowCost=%v rpm=%v",
+						shortSessionHash(sessionHash), accountID, clearSticky, g1, g2, g3, g4, g5, g6, g7)
+				}
+				if !clearSticky && g1 && g2 && g3 && g4 && g5 && g6 && g7 { // 粘性会话窗口费用+RPM 检查
 					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 					if err == nil && result.Acquired {
 						// 会话数量限制检查
 						// Session count limit check
 						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+							if s.debugModelRoutingEnabled() {
+								logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: session_limit (slot_acquired)",
+									shortSessionHash(sessionHash), accountID)
+							}
 							result.ReleaseFunc() // 释放槽位，继续到 Layer 2
 						} else {
 							if s.cache != nil {
 								_ = s.cache.RefreshSessionTTL(ctx, derefGroupID(groupID), sessionHash, stickySessionTTL)
 							}
+							if s.debugModelRoutingEnabled() {
+								logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d HIT",
+									shortSessionHash(sessionHash), accountID)
+							}
 							return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
 						}
+					} else if s.debugModelRoutingEnabled() {
+						acquired := false
+						if result != nil {
+							acquired = result.Acquired
+						}
+						logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d slot_acquire err=%v acquired=%v",
+							shortSessionHash(sessionHash), accountID, err, acquired)
 					}
 
 					waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
@@ -1649,9 +1673,17 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						// 会话数量限制检查（等待计划也需要占用会话配额）
 						// Session count limit check (wait plan also requires session quota)
 						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+							if s.debugModelRoutingEnabled() {
+								logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: session_limit (wait_plan)",
+									shortSessionHash(sessionHash), accountID)
+							}
 							// 会话限制已满，继续到 Layer 2
 							// Session limit full, continue to Layer 2
 						} else {
+							if s.debugModelRoutingEnabled() {
+								logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d WAIT_PLAN",
+									shortSessionHash(sessionHash), accountID)
+							}
 							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 								AccountID:      accountID,
 								MaxConcurrency: account.Concurrency,
@@ -1659,6 +1691,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								MaxWaiting:     cfg.StickySessionMaxWaiting,
 							})
 						}
+					} else if s.debugModelRoutingEnabled() {
+						logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: wait_queue_full waiting=%d max=%d",
+							shortSessionHash(sessionHash), accountID, waitingCount, cfg.StickySessionMaxWaiting)
 					}
 				}
 			}
