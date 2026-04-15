@@ -763,7 +763,8 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			require.True(t, system.Exists())
 			require.True(t, system.IsArray(), "system should be an array")
 			blocks := system.Array()
-			require.Len(t, blocks, 3, "system should have 3 blocks: billing + banner + user content")
+			require.Len(t, blocks, 4,
+				"system should have 4 blocks: billing + banner + agent + env (CLI 2.1.107 layout)")
 
 			// system[0]: sub2api 注入的 billing header (无 cache_control)
 			require.Contains(t, blocks[0].Get("text").String(), "x-anthropic-billing-header:")
@@ -779,6 +780,10 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			require.Equal(t, "ephemeral", blocks[2].Get("cache_control.type").String())
 			require.Equal(t, "1h", blocks[2].Get("cache_control.ttl").String())
 			require.Equal(t, "global", blocks[2].Get("cache_control.scope").String())
+
+			// system[3]: default env / session / memory template (no cache_control)
+			require.Equal(t, defaultClaudeCodeEnvPrompt, blocks[3].Get("text").String())
+			require.False(t, blocks[3].Get("cache_control").Exists())
 
 			// messages 不应被改动：仍只有原始 1 条
 			messages := gjson.GetBytes(upstream.lastBody, "messages")

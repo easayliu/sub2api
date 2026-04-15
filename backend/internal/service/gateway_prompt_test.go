@@ -9,55 +9,57 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestIsClaudeCodeClient(t *testing.T) {
+// TestIsClaudeCodeRequest_StrictContextOnly verifies that isClaudeCodeRequest
+// trusts only the validator-written context flag. Spoofed UA + metadata.user_id
+// must NOT be treated as CLI traffic; those requests must be routed through the
+// mimic path so their body is normalised to CLI wire format before upstream.
+func TestIsClaudeCodeRequest_StrictContextOnly(t *testing.T) {
 	tests := []struct {
-		name           string
-		userAgent      string
-		metadataUserID string
-		want           bool
+		name        string
+		ctxFlag     *bool // nil: key absent, false: explicit false, true: explicit true
+		userAgent   string
+		metadataID  string
+		wantCLIPath bool
 	}{
 		{
-			name:           "Claude Code client",
-			userAgent:      "claude-cli/1.0.62 (darwin; arm64)",
-			metadataUserID: "session_123e4567-e89b-12d3-a456-426614174000",
-			want:           true,
+			name:        "validator confirmed CLI -> CLI path",
+			ctxFlag:     boolPtr(true),
+			userAgent:   "claude-cli/2.1.107 (external, cli)",
+			metadataID:  `{"device_id":"abc","session_id":"sid"}`,
+			wantCLIPath: true,
 		},
 		{
-			name:           "Claude Code without version suffix",
-			userAgent:      "claude-cli/2.0.0",
-			metadataUserID: "session_abc",
-			want:           true,
+			name:        "validator rejected but UA/metadata look spoofed -> mimic (strict)",
+			ctxFlag:     boolPtr(false),
+			userAgent:   "claude-cli/2.1.107 (external, cli)",
+			metadataID:  `{"device_id":"abc","session_id":"sid"}`,
+			wantCLIPath: false,
 		},
 		{
-			name:           "Missing metadata user_id",
-			userAgent:      "claude-cli/1.0.0",
-			metadataUserID: "",
-			want:           false,
+			name:        "validator rejected + non-CLI UA -> mimic",
+			ctxFlag:     boolPtr(false),
+			userAgent:   "curl/7.68.0",
+			metadataID:  "",
+			wantCLIPath: false,
 		},
 		{
-			name:           "Different user agent",
-			userAgent:      "curl/7.68.0",
-			metadataUserID: "user123",
-			want:           false,
-		},
-		{
-			name:           "Empty user agent",
-			userAgent:      "",
-			metadataUserID: "user123",
-			want:           false,
-		},
-		{
-			name:           "Similar but not Claude CLI",
-			userAgent:      "claude-api/1.0.0",
-			metadataUserID: "user123",
-			want:           false,
+			name:        "context key absent -> mimic (safer default)",
+			ctxFlag:     nil,
+			userAgent:   "claude-cli/2.1.107 (external, cli)",
+			metadataID:  `{"device_id":"abc"}`,
+			wantCLIPath: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isClaudeCodeClient(tt.userAgent, tt.metadataUserID)
-			require.Equal(t, tt.want, got)
+			ctx := t.Context()
+			if tt.ctxFlag != nil {
+				ctx = SetClaudeCodeClient(ctx, *tt.ctxFlag)
+			}
+			parsed := &ParsedRequest{MetadataUserID: tt.metadataID}
+			got := isClaudeCodeRequest(ctx, nil, parsed)
+			require.Equal(t, tt.wantCLIPath, got)
 		})
 	}
 }
@@ -282,7 +284,7 @@ func TestInjectClaudeCodePrompt(t *testing.T) {
 }
 
 func TestRewriteSystemForNonClaudeCode(t *testing.T) {
-	const billingHeaderText = "x-anthropic-billing-header: cc_version=2.1.107; cc_entrypoint=cli; cch=00000;"
+	const billingHeaderText = "x-anthropic-billing-header: cc_version=2.1.107.c33; cc_entrypoint=cli; cch=00000;"
 
 	tests := []struct {
 		name              string
@@ -354,7 +356,8 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 
 			systemArr, ok := parsed["system"].([]any)
 			require.True(t, ok, "system should be an array, got %T", parsed["system"])
-			require.Len(t, systemArr, 3, "system always has 3 blocks: billing + banner + agent prompt")
+			require.Len(t, systemArr, 4,
+				"system always has 4 blocks: billing + banner + agent + env (matches CLI 2.1.107 capture)")
 
 			block0 := systemArr[0].(map[string]any)
 			require.Equal(t, "text", block0["type"])
@@ -379,6 +382,12 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			require.Equal(t, "1h", cc["ttl"])
 			require.Equal(t, "global", cc["scope"])
 
+			block3 := systemArr[3].(map[string]any)
+			require.Equal(t, "text", block3["type"])
+			require.Equal(t, defaultClaudeCodeEnvPrompt, block3["text"])
+			require.Nil(t, block3["cache_control"],
+				"system[3] (env block) must NOT carry cache_control per CLI capture")
+
 			// 防回退：每个 block 的 JSON key 顺序必须 type→text(→cache_control)，scope 在 ttl 后
 			raw := string(result)
 			require.NotContains(t, raw, `{"cache_control"`, "block 不应以 cache_control 开头（字母序）")
@@ -394,6 +403,37 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			require.Len(t, messages, len(originalMessages), "messages must not be mutated")
 		})
 	}
+}
+
+func TestMimicCLIBodyFields(t *testing.T) {
+	t.Run("non-haiku: injects thinking + context_management + output_config", func(t *testing.T) {
+		body := []byte(`{"model":"claude-opus-4-6","messages":[]}`)
+		out := mimicCLIBodyFields(body, "claude-opus-4-6")
+
+		require.Equal(t, "adaptive", gjson.GetBytes(out, "thinking.type").String())
+		require.Equal(t, "all", gjson.GetBytes(out, "context_management.edits.0.keep").String())
+		require.Equal(t, "clear_thinking_20251015", gjson.GetBytes(out, "context_management.edits.0.type").String())
+		require.Equal(t, "medium", gjson.GetBytes(out, "output_config.effort").String())
+	})
+
+	t.Run("haiku: skipped entirely", func(t *testing.T) {
+		body := []byte(`{"model":"claude-haiku-4-5","messages":[]}`)
+		out := mimicCLIBodyFields(body, "claude-haiku-4-5")
+
+		require.False(t, gjson.GetBytes(out, "thinking").Exists())
+		require.False(t, gjson.GetBytes(out, "context_management").Exists())
+		require.False(t, gjson.GetBytes(out, "output_config").Exists())
+	})
+
+	t.Run("client-provided fields win", func(t *testing.T) {
+		body := []byte(`{"model":"claude-opus-4-6","thinking":{"type":"enabled","budget_tokens":1024},"output_config":{"effort":"high"},"context_management":{"custom":true},"messages":[]}`)
+		out := mimicCLIBodyFields(body, "claude-opus-4-6")
+
+		require.Equal(t, "enabled", gjson.GetBytes(out, "thinking.type").String())
+		require.Equal(t, int64(1024), gjson.GetBytes(out, "thinking.budget_tokens").Int())
+		require.Equal(t, "high", gjson.GetBytes(out, "output_config.effort").String())
+		require.True(t, gjson.GetBytes(out, "context_management.custom").Bool())
+	})
 }
 
 func TestMimicCLIMessages(t *testing.T) {

@@ -3560,23 +3560,20 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// isClaudeCodeClient 判断请求是否来自 Claude Code 客户端
-// 简化判断：User-Agent 匹配 + metadata.user_id 存在
-func isClaudeCodeClient(userAgent string, metadataUserID string) bool {
-	if metadataUserID == "" {
-		return false
-	}
-	return claudeCliUserAgentRe.MatchString(userAgent)
-}
-
-func isClaudeCodeRequest(ctx context.Context, c *gin.Context, parsed *ParsedRequest) bool {
-	if IsClaudeCodeClient(ctx) {
-		return true
-	}
-	if parsed == nil || c == nil {
-		return false
-	}
-	return isClaudeCodeClient(c.GetHeader("User-Agent"), parsed.MetadataUserID)
+// isClaudeCodeRequest returns true only when the handler-layer ClaudeCodeValidator
+// has confirmed this request matches real Claude Code traffic (UA + system prompt
+// similarity + required headers + metadata.user_id format).
+//
+// A weaker UA+metadata heuristic used to live here as a fallback; it was removed
+// because any third-party client can trivially spoof those two fields and would
+// then bypass mimic rewrite, leaking its original (non-CLI-shaped) body to
+// upstream. Strict-only ensures anything unverified gets routed through mimic so
+// its body is normalised to CLI wire format before reaching Anthropic.
+//
+// c and parsed are retained for signature stability / future extension even
+// though they are not consulted.
+func isClaudeCodeRequest(ctx context.Context, _ *gin.Context, _ *ParsedRequest) bool {
+	return IsClaudeCodeClient(ctx)
 }
 
 // normalizeSystemParam 将 json.RawMessage 类型的 system 参数转为标准 Go 类型（string / []any / nil），
@@ -3731,12 +3728,14 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 }
 
 // rewriteSystemForNonClaudeCode 将非 Claude Code 客户端的 system 字段重组为
-// 直连 CLI 抓包的 3 块结构：
+// 直连 CLI 2.1.107 抓包的 4 块结构：
 //
 //	[0] x-anthropic-billing-header（cc_version 由 syncBillingHeaderVersion 后置同步，
 //	    cch 固定 00000 占位）— 无 cache_control
 //	[1] Claude Code banner — 无 cache_control
-//	[2] 客户端原始 system 文本（若有）— 带 cache_control {ephemeral, ttl=1h, scope=global}
+//	[2] agent 指令（原始 system 或 default agent prompt fallback）
+//	    — 带 cache_control {ephemeral, ttl=1h, scope=global}
+//	[3] environment / session / memory / runtime 指令（static template）— 无 cache_control
 //
 // messages 不再插入 [System Instructions]/ack 伪对话，避免在消息层留下第三方特征。
 func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
@@ -3759,15 +3758,15 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 	}
 
 	ccPromptTrimmed := strings.TrimSpace(claudeCodeSystemPrompt)
-	block2Text := originalSystemText
-	if block2Text == "" || block2Text == ccPromptTrimmed {
-		block2Text = defaultClaudeCodeAgentPrompt
+	agentText := originalSystemText
+	if agentText == "" || agentText == ccPromptTrimmed {
+		agentText = defaultClaudeCodeAgentPrompt
 	}
 
 	blocks := []anthropicSystemTextBlockPayload{
 		{
 			Type: "text",
-			Text: "x-anthropic-billing-header: cc_version=2.1.107; cc_entrypoint=cli; cch=00000;",
+			Text: "x-anthropic-billing-header: cc_version=2.1.107.c33; cc_entrypoint=cli; cch=00000;",
 		},
 		{
 			Type: "text",
@@ -3775,12 +3774,16 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 		},
 		{
 			Type: "text",
-			Text: block2Text,
+			Text: agentText,
 			CacheControl: &anthropicCacheControlPayload{
 				Type:  "ephemeral",
 				TTL:   "1h",
 				Scope: "global",
 			},
+		},
+		{
+			Type: "text",
+			Text: defaultClaudeCodeEnvPrompt,
 		},
 	}
 
@@ -3850,6 +3853,48 @@ func mimicCLIMessages(body []byte) []byte {
 	path := fmt.Sprintf("messages.%d.content.%d.cache_control", lastUserIdx, lastTextIdx)
 	if next, ok := setJSONValueBytes(out, path, cc); ok {
 		out = next
+	}
+	return out
+}
+
+// mimicCLIBodyFields injects the three top-level fields CLI 2.1.107 unconditionally
+// sends on non-haiku /v1/messages requests so mimic traffic matches direct-CLI shape:
+//
+//   - thinking:            {type: "adaptive"}
+//   - context_management:  {edits: [{keep: "all", type: "clear_thinking_20251015"}]}
+//   - output_config:       {effort: "medium"}
+//
+// Each field is left untouched when the client already provided one, so client
+// intent wins. Haiku requests are skipped because the CLI emits a different
+// body schema for haiku (title-gen path uses output_config.format instead).
+func mimicCLIBodyFields(body []byte, modelID string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if strings.Contains(strings.ToLower(modelID), "haiku") {
+		return body
+	}
+
+	out := body
+	if !gjson.GetBytes(out, "thinking").Exists() {
+		if next, ok := setJSONValueBytes(out, "thinking", map[string]any{"type": "adaptive"}); ok {
+			out = next
+		}
+	}
+	if !gjson.GetBytes(out, "context_management").Exists() {
+		cm := map[string]any{
+			"edits": []map[string]any{
+				{"keep": "all", "type": "clear_thinking_20251015"},
+			},
+		}
+		if next, ok := setJSONValueBytes(out, "context_management", cm); ok {
+			out = next
+		}
+	}
+	if !gjson.GetBytes(out, "output_config").Exists() {
+		if next, ok := setJSONValueBytes(out, "output_config", map[string]any{"effort": "medium"}); ok {
+			out = next
+		}
 	}
 	return out
 }
@@ -4144,6 +4189,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
 		body = mimicCLIMessages(body)
+		body = mimicCLIBodyFields(body, reqModel)
 	}
 
 	// Align cache_control ttl with direct-CLI traffic. CLI 2.1.107 downgrades
@@ -5723,9 +5769,18 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// 同步 billing header cc_version 与实际发送的 User-Agent 版本
-	if fingerprint != nil {
-		body = syncBillingHeaderVersion(body, fingerprint.UserAgent)
+	// Sync billing-header cc_version with the User-Agent actually sent upstream.
+	// Mimic path: applyClaudeCodeMimicHeaders forces UA to claude.DefaultHeaders,
+	// so align cc_version with that instead of the (possibly stale) cached fingerprint UA.
+	// Non-mimic path: cached fingerprint tracks the CLI client's own UA.
+	syncUA := ""
+	if mimicClaudeCode {
+		syncUA = claude.DefaultHeaders["User-Agent"]
+	} else if fingerprint != nil {
+		syncUA = fingerprint.UserAgent
+	}
+	if syncUA != "" {
+		body = syncBillingHeaderVersion(body, syncUA)
 	}
 	// CCH 签名：将 cch=00000 占位符替换为 xxHash64 签名（需在所有 body 修改之后）
 	if enableCCH {
@@ -5799,18 +5854,20 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 				claude.BetaPromptCachingScope,
 			}
 			if !strings.Contains(strings.ToLower(modelID), "haiku") {
-				// Align with modern Claude CLI (2.1.104+) beta set to reduce
-				// cross-validation risk where UA claims new CLI but beta set looks old.
+				// Order matches CLI 2.1.107 direct-to-Anthropic captures exactly:
+				// claude-code, oauth, context-1m, interleaved-thinking, redact-thinking,
+				// context-management, prompt-caching-scope, advisor-tool,
+				// advanced-tool-use, effort. Token order is part of the wire fingerprint.
 				requiredBetas = []string{
 					claude.BetaClaudeCode,
 					claude.BetaOAuth,
+					claude.BetaContext1M,
 					claude.BetaInterleavedThinking,
 					claude.BetaRedactThinking,
 					claude.BetaContextManagement,
 					claude.BetaPromptCachingScope,
-					claude.BetaContext1M,
-					claude.BetaAdvancedToolUse,
 					claude.BetaAdvisorTool,
+					claude.BetaAdvancedToolUse,
 					claude.BetaEffort,
 				}
 			}
@@ -5834,13 +5891,26 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
-	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
-		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
-			if parsed := ParseMetadataUserID(uid); parsed != nil {
+	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖。
+	// For mimic traffic CLI 2.1.107 always sends this header; for real CLI we update
+	// an existing value in place when metadata.user_id carries a session_id.
+	if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
+		if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != "" {
+			if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" || mimicClaudeCode {
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
 			}
 		}
+	}
+	// Real CLI 2.1.107 emits X-Claude-Code-Session-Id on every /v1/messages call; if
+	// the mimic request still has no value (no parseable metadata.user_id), fall back
+	// to a fresh UUID so the header is always present for mimic traffic.
+	if mimicClaudeCode && getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") == "" {
+		setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", generateRandomUUID())
+	}
+	// Real CLI 2.1.107 emits a fresh x-client-request-id UUID on every request;
+	// mimic traffic must do the same to avoid missing-header fingerprinting.
+	if mimicClaudeCode {
+		setHeaderRaw(req.Header, "x-client-request-id", generateRandomUUID())
 	}
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
@@ -6265,7 +6335,11 @@ var defaultDroppedBetasSet = buildBetaTokenSet(claude.DroppedBetas)
 // applyClaudeCodeMimicHeaders forces "Claude Code-like" request headers.
 // This mirrors opencode-anthropic-auth behavior: do not trust downstream
 // headers when using Claude Code-scoped OAuth credentials.
-func applyClaudeCodeMimicHeaders(req *http.Request, isStream bool) {
+//
+// The isStream parameter is retained for signature stability; real CLI 2.1.107
+// captures never emit x-stainless-helper-method on streaming requests, so this
+// value is intentionally unused.
+func applyClaudeCodeMimicHeaders(req *http.Request, _ bool) {
 	if req == nil {
 		return
 	}
@@ -6281,9 +6355,10 @@ func applyClaudeCodeMimicHeaders(req *http.Request, isStream bool) {
 	}
 	// Real Claude CLI uses Accept: application/json (even for streaming).
 	setHeaderRaw(req.Header, "Accept", "application/json")
-	if isStream {
-		setHeaderRaw(req.Header, "x-stainless-helper-method", "stream")
-	}
+	// CLI 2.1.107 traffic does not emit x-stainless-helper-method; strip any
+	// leaked value inherited from client headers or earlier mimic passes.
+	req.Header.Del("x-stainless-helper-method")
+	req.Header.Del("X-Stainless-Helper-Method")
 }
 
 func truncateForLog(b []byte, maxBytes int) string {

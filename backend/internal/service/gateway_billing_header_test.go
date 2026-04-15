@@ -54,6 +54,16 @@ func TestSyncBillingHeaderVersion(t *testing.T) {
 			userAgent: "claude-cli/2.1.22",
 			unchanged: true,
 		},
+		{
+			// Regression: mimic placeholder with CLI 2.1.107 build-hash suffix must be
+			// preserved when UA is 2.1.107. The .c33 suffix tracks the CLI 2.1.107 build
+			// fingerprint observed in real traffic; losing it makes the billing-header
+			// trivially distinguishable from direct-CLI traffic.
+			name:      "preserves 2.1.107 build-hash suffix",
+			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.107.c33; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
+			userAgent: "claude-cli/2.1.107 (external, cli)",
+			wantSub:   "cc_version=2.1.107.c33",
+		},
 	}
 
 	for _, tt := range tests {
