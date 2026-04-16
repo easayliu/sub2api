@@ -19,7 +19,9 @@ func TestSyncBillingHeaderVersion(t *testing.T) {
 		unchanged bool   // expect body to remain the same
 	}{
 		{
-			name:      "replaces cc_version preserving message-derived suffix",
+			// Unknown version (not in officialBuildHash): preserve client suffix,
+			// only replace the X.Y.Z portion.
+			name:      "unknown version preserves client suffix",
 			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.81.df2; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}],"messages":[]}`,
 			userAgent: "claude-cli/2.1.22 (external, cli)",
 			wantSub:   "cc_version=2.1.22.df2",
@@ -55,14 +57,27 @@ func TestSyncBillingHeaderVersion(t *testing.T) {
 			unchanged: true,
 		},
 		{
-			// Regression: mimic placeholder with CLI 2.1.107 build-hash suffix must be
-			// preserved when UA is 2.1.107. The .c33 suffix tracks the CLI 2.1.107 build
-			// fingerprint observed in real traffic; losing it makes the billing-header
-			// trivially distinguishable from direct-CLI traffic.
-			name:      "preserves 2.1.107 build-hash suffix",
+			// 2.1.107 known official build-hash: enforce .c33 regardless of
+			// what the client sends (prevents non-official-CLI fingerprint leak).
+			name:      "enforces 2.1.107 official build-hash",
 			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.107.c33; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
 			userAgent: "claude-cli/2.1.107 (external, cli)",
 			wantSub:   "cc_version=2.1.107.c33",
+		},
+		{
+			// Non-official client suffix on known version: rewrite to official.
+			name:      "rewrites 2.1.110 non-official suffix to .610",
+			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.110.44f; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
+			userAgent: "claude-cli/2.1.110 (external, cli)",
+			wantSub:   "cc_version=2.1.110.610",
+		},
+		{
+			// Cross-version desync: body has 2.1.104.xxx, UA is 2.1.110 —
+			// rewrite both version AND suffix to official 2.1.110.610.
+			name:      "rewrites mismatched version to official 2.1.110.610",
+			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.104.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
+			userAgent: "claude-cli/2.1.110 (external, cli)",
+			wantSub:   "cc_version=2.1.110.610",
 		},
 	}
 

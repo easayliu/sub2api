@@ -10,9 +10,23 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ccVersionInBillingRe matches the semver part of cc_version (X.Y.Z), preserving
-// the trailing message-derived suffix (e.g. ".c02") if present.
+// ccVersionWithSuffixRe matches cc_version=X.Y.Z with an optional trailing
+// build-hash suffix (e.g. ".610"). Used when rewriting to the official value.
+var ccVersionWithSuffixRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+(?:\.[0-9a-f]+)?`)
+
+// ccVersionInBillingRe matches only the X.Y.Z portion. Used as fallback for
+// unknown versions: keep the client's original suffix untouched.
 var ccVersionInBillingRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+`)
+
+// officialBuildHash maps CLI X.Y.Z version to the build-hash suffix observed
+// in direct-CLI traffic to api.anthropic.com. Different client installations
+// compute different suffixes, but Anthropic's wire baseline expects the
+// official value — mismatches look like non-official CLI fingerprints.
+// When a version has no entry, we fall back to preserving the client's value.
+var officialBuildHash = map[string]string{
+	"2.1.110": "610",
+	"2.1.107": "c33",
+}
 
 // cchPlaceholderRe matches the cch=00000 placeholder in billing header text,
 // scoped to x-anthropic-billing-header to avoid touching user content.
@@ -38,13 +52,22 @@ func syncBillingHeaderVersion(body []byte, userAgent string) []byte {
 		return body
 	}
 
+	// Normalize build-hash suffix when we know the official value for this
+	// version. Otherwise fall back to preserving whatever the client sent
+	// (preserves backward compatibility with versions we haven't captured).
 	replacement := "cc_version=" + version
 	idx := 0
 	systemResult.ForEach(func(_, item gjson.Result) bool {
 		text := item.Get("text")
 		if text.Exists() && text.Type == gjson.String &&
 			strings.HasPrefix(text.String(), "x-anthropic-billing-header") {
-			newText := ccVersionInBillingRe.ReplaceAllString(text.String(), replacement)
+			var newText string
+			if officialSuffix, ok := officialBuildHash[version]; ok {
+				newText = ccVersionWithSuffixRe.ReplaceAllString(text.String(), replacement+"."+officialSuffix)
+			} else {
+				// Unknown version: only replace the X.Y.Z portion, keep suffix.
+				newText = ccVersionInBillingRe.ReplaceAllString(text.String(), replacement)
+			}
 			if newText != text.String() {
 				if updated, err := sjson.SetBytes(body, fmt.Sprintf("system.%d.text", idx), newText); err == nil {
 					body = updated
