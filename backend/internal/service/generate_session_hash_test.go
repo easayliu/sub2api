@@ -33,7 +33,51 @@ func TestGenerateSessionHash_MetadataHasHighestPriority(t *testing.T) {
 	}
 
 	hash := svc.GenerateSessionHash(parsed)
-	require.Equal(t, "123e4567-e89b-12d3-a456-426614174000", hash, "metadata session_id should have highest priority")
+	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", hash, "metadata device_id should have highest priority")
+}
+
+func TestGenerateSessionHash_MetadataDeviceIDPinnedAcrossSessions(t *testing.T) {
+	svc := &GatewayService{}
+
+	// 模拟 Claude Code CLI agent 场景：同一 device，每次子调用 session_id 都不同
+	parsed1 := &ParsedRequest{
+		MetadataUserID: `{"device_id":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","account_uuid":"","session_id":"11111111-1111-1111-1111-111111111111"}`,
+		System:         "agent subtask 1",
+		HasSystem:      true,
+		Messages: []any{
+			map[string]any{"role": "user", "content": "task 1"},
+		},
+	}
+	parsed2 := &ParsedRequest{
+		MetadataUserID: `{"device_id":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","account_uuid":"","session_id":"22222222-2222-2222-2222-222222222222"}`,
+		System:         "agent subtask 2",
+		HasSystem:      true,
+		Messages: []any{
+			map[string]any{"role": "user", "content": "task 2"},
+		},
+	}
+
+	h1 := svc.GenerateSessionHash(parsed1)
+	h2 := svc.GenerateSessionHash(parsed2)
+	require.Equal(t, h1, h2, "same device_id with different session_id should produce same hash (agent sticky)")
+	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", h1)
+}
+
+func TestGenerateSessionHash_MetadataInvalidFallsBackToContentHash(t *testing.T) {
+	svc := &GatewayService{}
+
+	// JSON 中 device_id 为空会让 ParseMetadataUserID 返回 nil，
+	// 此时应 fallback 到第 3 档（基于 system+messages 的内容 hash）。
+	parsed := &ParsedRequest{
+		MetadataUserID: `{"device_id":"","account_uuid":"","session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}`,
+		Messages: []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+	}
+	hash := svc.GenerateSessionHash(parsed)
+	require.NotEmpty(t, hash, "invalid metadata should fall back to content-based hash, not empty")
+	// 确认不是 session_id（因为 parser 返回 nil，根本没进第 1 档）
+	require.NotEqual(t, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", hash)
 }
 
 // ============ System + Messages 基础测试 ============
@@ -208,8 +252,8 @@ func TestGenerateSessionHash_MetadataOverridesSessionContext(t *testing.T) {
 	}
 
 	hash := svc.GenerateSessionHash(parsed)
-	require.Equal(t, "123e4567-e89b-12d3-a456-426614174000", hash,
-		"metadata session_id should take priority over SessionContext")
+	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", hash,
+		"metadata device_id should take priority over SessionContext")
 }
 
 func TestGenerateSessionHash_MetadataJSON_HasHighestPriority(t *testing.T) {
@@ -225,7 +269,7 @@ func TestGenerateSessionHash_MetadataJSON_HasHighestPriority(t *testing.T) {
 	}
 
 	hash := svc.GenerateSessionHash(parsed)
-	require.Equal(t, "c72554f2-1234-5678-abcd-123456789abc", hash, "JSON format metadata session_id should have highest priority")
+	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", hash, "JSON format metadata device_id should have highest priority")
 }
 
 func TestGenerateSessionHash_NilSessionContextBackwardCompatible(t *testing.T) {
