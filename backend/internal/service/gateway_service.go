@@ -660,19 +660,10 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 		return ""
 	}
 
-	// 1. 最高优先级：从 metadata.user_id 提取粘性 key。
-	// 优先使用 device_id：官方 Claude Code CLI 的 Task/子 agent 每次子调用都会
-	// 刷新 session_id，但同一台设备的 device_id 保持不变。按 device_id 粘性可
-	// 以避免 agent 模式下的请求在多个 OAuth 账号之间漂移。
-	// device_id 缺失时回退到 session_id，保持对旧协议/非标准客户端的兼容。
+	// 1. 最高优先级：从 metadata.user_id 提取 session_xxx
 	if parsed.MetadataUserID != "" {
-		if uid := ParseMetadataUserID(parsed.MetadataUserID); uid != nil {
-			if uid.DeviceID != "" {
-				return uid.DeviceID
-			}
-			if uid.SessionID != "" {
-				return uid.SessionID
-			}
+		if uid := ParseMetadataUserID(parsed.MetadataUserID); uid != nil && uid.SessionID != "" {
+			return uid.SessionID
 		}
 	}
 
