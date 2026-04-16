@@ -84,6 +84,22 @@ func FormatMetadataUserID(deviceID, accountUUID, sessionID, uaVersion string) st
 	return "user_" + deviceID + "_account_" + accountUUID + "_session_" + sessionID
 }
 
+// FormatMetadataUserIDPreserve builds a metadata.user_id string preserving
+// the original wire format (JSON vs legacy) based on the parsed input.
+// This avoids format mismatches when the fingerprint UA is missing or
+// cannot be parsed to extract a CLI version.
+func FormatMetadataUserIDPreserve(deviceID, accountUUID, sessionID string, jsonFormat bool) string {
+	if jsonFormat {
+		b, _ := json.Marshal(jsonUserID{
+			DeviceID:    deviceID,
+			AccountUUID: accountUUID,
+			SessionID:   sessionID,
+		})
+		return string(b)
+	}
+	return "user_" + deviceID + "_account_" + accountUUID + "_session_" + sessionID
+}
+
 // IsNewMetadataFormatVersion returns true if the given CLI version uses the
 // new JSON metadata.user_id format (>= 2.1.78).
 func IsNewMetadataFormatVersion(version string) bool {
