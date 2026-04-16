@@ -1640,7 +1640,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				// Gate check failed: clear stale sticky binding so Layer 2
 				// can write a fresh one. Without this, every subsequent
 				// request hits the same stale binding and drifts.
-				if !clearSticky && !(g1 && g2 && g3 && g4 && g5 && g6 && g7) {
+				if !clearSticky && (!g1 || !g2 || !g3 || !g4 || !g5 || !g6 || !g7) {
 					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					if s.debugModelRoutingEnabled() {
 						logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: gate_failed, cleared stale binding",
