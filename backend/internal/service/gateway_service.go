@@ -5822,12 +5822,12 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// Sync billing-header cc_version with the User-Agent actually sent upstream.
-	// Mimic path: applyClaudeCodeMimicHeaders forces UA to claude.DefaultHeaders,
-	// so align cc_version with that instead of the (possibly stale) cached fingerprint UA.
-	// Non-mimic path: cached fingerprint tracks the CLI client's own UA.
+	// Sync billing-header cc_version with the User-Agent we will actually
+	// send upstream. Both mimic and non-mimic paths now force UA to
+	// claude.DefaultHeaders (currently 2.1.110) so cc_version and its
+	// official build-hash suffix stay aligned with real CLI direct traffic.
 	syncUA := ""
-	if mimicClaudeCode {
+	if tokenType == "oauth" {
 		syncUA = claude.DefaultHeaders["User-Agent"]
 	} else if fingerprint != nil {
 		syncUA = fingerprint.UserAgent
@@ -5881,6 +5881,15 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 	if tokenType == "oauth" {
 		applyClaudeOAuthHeaderDefaults(req)
+		// Pin OAuth User-Agent to the canonical CLI version regardless of
+		// what the client sent or what the fingerprint cached. Different
+		// client builds leak non-official UAs (e.g. 2.1.104 from Linux
+		// terminals) which don't match the cc_version/build-hash baseline.
+		// Forcing a single UA keeps UA, cc_version, and build-hash all
+		// consistent with direct-CLI traffic.
+		if pinnedUA := claude.DefaultHeaders["User-Agent"]; pinnedUA != "" {
+			setHeaderRaw(req.Header, "User-Agent", pinnedUA)
+		}
 	}
 
 	// Build effective drop set: merge static defaults with dynamic beta policy filter rules
