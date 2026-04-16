@@ -5809,6 +5809,29 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 					}
 				}
 			}
+
+			// 3. Non-mimic (real CLI): restore original session_id in body
+			// after metadata rewrite. RewriteUserID hashes session_id for
+			// privacy, but real CLI traffic must keep the original value so
+			// header and body stay consistent and match direct-CLI behavior.
+			if !mimicClaudeCode && !enableMPT {
+				origSID := getHeaderRaw(clientHeaders, "X-Claude-Code-Session-Id")
+				if origSID != "" {
+					if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
+						if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != origSID {
+							fpUA := ""
+							if fp != nil {
+								fpUA = fp.UserAgent
+							}
+							version := ExtractCLIVersion(fpUA)
+							restoredUID := FormatMetadataUserID(parsed.DeviceID, parsed.AccountUUID, origSID, version)
+							if nb, err := sjson.SetBytes(body, "metadata.user_id", restoredUID); err == nil {
+								body = nb
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -5920,9 +5943,33 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			}
 			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
 		} else {
-			// Claude Code 客户端：尽量透传原始 header，仅补齐 oauth beta
+			// Claude Code 客户端（非 mimic）：透传原始 header，补齐 oauth +
+			// advisor-tool / advanced-tool-use 等 CLI 2.1.110 必发 token。
+			// 客户端经反代到达时可能丢失部分 beta token，按真实 CLI wire
+			// 顺序合并补齐，避免上游指纹差异。
 			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
-			setHeaderRaw(req.Header, "anthropic-beta", stripBetaTokensWithSet(s.getBetaHeader(modelID, clientBetaHeader), effectiveDropSet))
+			requiredBetas := []string{
+				claude.BetaOAuth,
+				claude.BetaInterleavedThinking,
+				claude.BetaRedactThinking,
+				claude.BetaContextManagement,
+				claude.BetaPromptCachingScope,
+			}
+			if !strings.Contains(strings.ToLower(modelID), "haiku") {
+				requiredBetas = []string{
+					claude.BetaClaudeCode,
+					claude.BetaOAuth,
+					claude.BetaContext1M,
+					claude.BetaInterleavedThinking,
+					claude.BetaRedactThinking,
+					claude.BetaContextManagement,
+					claude.BetaPromptCachingScope,
+					claude.BetaAdvisorTool,
+					claude.BetaAdvancedToolUse,
+					claude.BetaEffort,
+				}
+			}
+			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, clientBetaHeader, effectiveDropSet))
 		}
 	} else {
 		// API-key accounts: apply beta policy filter to strip controlled tokens

@@ -403,7 +403,8 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			require.True(t, ok, "messages should be an array")
 			var originalParsed map[string]any
 			require.NoError(t, json.Unmarshal([]byte(tt.body), &originalParsed))
-			originalMessages := originalParsed["messages"].([]any)
+			originalMessages, ok := originalParsed["messages"].([]any)
+			require.True(t, ok, "original messages should be an array")
 			require.Len(t, messages, len(originalMessages), "messages must not be mutated")
 		})
 	}
@@ -448,9 +449,13 @@ func TestMimicCLIMessages(t *testing.T) {
 		var parsed map[string]any
 		require.NoError(t, json.Unmarshal(out, &parsed))
 
-		msgs := parsed["messages"].([]any)
+		msgs, ok := parsed["messages"].([]any)
+		require.True(t, ok, "messages should be an array")
 		require.Len(t, msgs, 1)
-		content := msgs[0].(map[string]any)["content"].([]any)
+		firstMsg, ok := msgs[0].(map[string]any)
+		require.True(t, ok, "first message should be a map")
+		content, ok := firstMsg["content"].([]any)
+		require.True(t, ok, "content should be an array")
 		require.Len(t, content, 1)
 		block := content[0].(map[string]any)
 		require.Equal(t, "text", block["type"])
