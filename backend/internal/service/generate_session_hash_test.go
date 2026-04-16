@@ -36,10 +36,10 @@ func TestGenerateSessionHash_MetadataHasHighestPriority(t *testing.T) {
 	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", hash, "metadata device_id should have highest priority")
 }
 
-func TestGenerateSessionHash_MetadataDeviceIDPinnedAcrossSessions(t *testing.T) {
+func TestGenerateSessionHash_MetadataSessionIDPriority(t *testing.T) {
 	svc := &GatewayService{}
 
-	// 模拟 Claude Code CLI agent 场景：同一 device，每次子调用 session_id 都不同
+	// session_id 优先于 device_id 作为粘性 key
 	parsed1 := &ParsedRequest{
 		MetadataUserID: `{"device_id":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","account_uuid":"","session_id":"11111111-1111-1111-1111-111111111111"}`,
 		System:         "agent subtask 1",
@@ -59,8 +59,26 @@ func TestGenerateSessionHash_MetadataDeviceIDPinnedAcrossSessions(t *testing.T) 
 
 	h1 := svc.GenerateSessionHash(parsed1)
 	h2 := svc.GenerateSessionHash(parsed2)
-	require.Equal(t, h1, h2, "same device_id with different session_id should produce same hash (agent sticky)")
-	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", h1)
+	require.NotEqual(t, h1, h2, "different session_id should produce different hash")
+	require.Equal(t, "11111111-1111-1111-1111-111111111111", h1)
+	require.Equal(t, "22222222-2222-2222-2222-222222222222", h2)
+}
+
+func TestGenerateSessionHash_DeviceIDFallbackWhenNoSessionID(t *testing.T) {
+	svc := &GatewayService{}
+
+	// session_id 缺失时回退到 device_id
+	parsed := &ParsedRequest{
+		MetadataUserID: `{"device_id":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","account_uuid":""}`,
+		System:         "test",
+		HasSystem:      true,
+		Messages: []any{
+			map[string]any{"role": "user", "content": "test"},
+		},
+	}
+
+	h := svc.GenerateSessionHash(parsed)
+	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", h)
 }
 
 func TestGenerateSessionHash_MetadataInvalidFallsBackToContentHash(t *testing.T) {

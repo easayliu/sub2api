@@ -661,17 +661,16 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 	}
 
 	// 1. 最高优先级：从 metadata.user_id 提取粘性 key。
-	// 优先使用 device_id：官方 Claude Code CLI 的 Task/子 agent 每次子调用都会
-	// 刷新 session_id，但同一台设备的 device_id 保持不变。按 device_id 粘性可
-	// 以避免 agent 模式下的请求在多个 OAuth 账号之间漂移。
-	// device_id 缺失时回退到 session_id，保持对旧协议/非标准客户端的兼容。
+	// 使用 session_id：每个 CLI 会话有唯一的 session_id，用它做粘性 key
+	// 可以让同一会话的所有请求（包括子 agent）路由到同一个 OAuth 账号。
+	// session_id 缺失时回退到 device_id，保持对旧协议/非标准客户端的兼容。
 	if parsed.MetadataUserID != "" {
 		if uid := ParseMetadataUserID(parsed.MetadataUserID); uid != nil {
-			if uid.DeviceID != "" {
-				return uid.DeviceID
-			}
 			if uid.SessionID != "" {
 				return uid.SessionID
+			}
+			if uid.DeviceID != "" {
+				return uid.DeviceID
 			}
 		}
 	}
@@ -1637,6 +1636,16 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					logger.LegacyPrintf("service.gateway",
 						"[StickyLayer1.5] session=%s account=%d clear=%v inGroup=%v platform=%v model=%v modelSel=%v quota=%v windowCost=%v rpm=%v",
 						shortSessionHash(sessionHash), accountID, clearSticky, g1, g2, g3, g4, g5, g6, g7)
+				}
+				// Gate check failed: clear stale sticky binding so Layer 2
+				// can write a fresh one. Without this, every subsequent
+				// request hits the same stale binding and drifts.
+				if !clearSticky && !(g1 && g2 && g3 && g4 && g5 && g6 && g7) {
+					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+					if s.debugModelRoutingEnabled() {
+						logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: gate_failed, cleared stale binding",
+							shortSessionHash(sessionHash), accountID)
+					}
 				}
 				if !clearSticky && g1 && g2 && g3 && g4 && g5 && g6 && g7 { // 粘性会话窗口费用+RPM 检查
 					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
@@ -5810,28 +5819,6 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 				}
 			}
 
-			// 3. Non-mimic (real CLI): restore original session_id in body
-			// after metadata rewrite. RewriteUserID hashes session_id for
-			// privacy, but real CLI traffic must keep the original value so
-			// header and body stay consistent and match direct-CLI behavior.
-			if !mimicClaudeCode && !enableMPT {
-				origSID := getHeaderRaw(clientHeaders, "X-Claude-Code-Session-Id")
-				if origSID != "" {
-					if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
-						if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != origSID {
-							fpUA := ""
-							if fp != nil {
-								fpUA = fp.UserAgent
-							}
-							version := ExtractCLIVersion(fpUA)
-							restoredUID := FormatMetadataUserID(parsed.DeviceID, parsed.AccountUUID, origSID, version)
-							if nb, err := sjson.SetBytes(body, "metadata.user_id", restoredUID); err == nil {
-								body = nb
-							}
-						}
-					}
-				}
-			}
 		}
 	}
 
