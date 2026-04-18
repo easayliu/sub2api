@@ -5822,14 +5822,16 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// Sync billing-header cc_version with the User-Agent we will actually
-	// send upstream. Both mimic and non-mimic paths now force UA to
-	// claude.DefaultHeaders (currently 2.1.110) so cc_version and its
-	// official build-hash suffix stay aligned with real CLI direct traffic.
+	// Sync billing-header cc_version with the UA we will actually send.
+	// Real Claude Code CLI traffic is passed through verbatim (no rewrite) —
+	// whatever cc_version the client sent stays. Only mimic clients need
+	// synthesis against the pinned canonical UA, and non-OAuth API-key
+	// traffic falls back to the cached fingerprint UA.
 	syncUA := ""
-	if tokenType == "oauth" {
+	switch {
+	case mimicClaudeCode:
 		syncUA = claude.DefaultHeaders["User-Agent"]
-	} else if fingerprint != nil {
+	case tokenType != "oauth" && fingerprint != nil:
 		syncUA = fingerprint.UserAgent
 	}
 	if syncUA != "" {
@@ -5867,8 +5869,10 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// OAuth账号：应用缓存的指纹到请求头（覆盖白名单透传的头）
-	if fingerprint != nil {
+	// OAuth账号：应用缓存的指纹到请求头（覆盖白名单透传的头）。
+	// 真 Claude Code CLI 直接透传：客户端已发出规范头，不用缓存指纹覆盖；
+	// 仅 mimic 客户端或非 OAuth 路径需要应用指纹。
+	if fingerprint != nil && (mimicClaudeCode || tokenType != "oauth") {
 		s.identityService.ApplyFingerprint(req, fingerprint)
 	}
 
@@ -5881,14 +5885,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 	if tokenType == "oauth" {
 		applyClaudeOAuthHeaderDefaults(req)
-		// Pin OAuth User-Agent to the canonical CLI version regardless of
-		// what the client sent or what the fingerprint cached. Different
-		// client builds leak non-official UAs (e.g. 2.1.104 from Linux
-		// terminals) which don't match the cc_version/build-hash baseline.
-		// Forcing a single UA keeps UA, cc_version, and build-hash all
-		// consistent with direct-CLI traffic.
-		if pinnedUA := claude.DefaultHeaders["User-Agent"]; pinnedUA != "" {
-			setHeaderRaw(req.Header, "User-Agent", pinnedUA)
+		// Only pin UA for mimic clients (non-Claude-Code tools using OAuth
+		// credentials). Real Claude Code CLI traffic is passed through
+		// verbatim so upstream sees the client's actual UA/version.
+		if mimicClaudeCode {
+			if pinnedUA := claude.DefaultHeaders["User-Agent"]; pinnedUA != "" {
+				setHeaderRaw(req.Header, "User-Agent", pinnedUA)
+			}
 		}
 	}
 
@@ -8822,8 +8825,10 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// 同步 billing header cc_version 与实际发送的 User-Agent 版本
-	if ctFingerprint != nil && ctEnableFP {
+	// 同步 billing header cc_version 与实际发送的 User-Agent 版本。
+	// 真 Claude Code CLI 直接透传：跳过，让客户端原始 cc_version 原样上行；
+	// mimic 客户端沿用指纹 UA 做同步。
+	if ctFingerprint != nil && ctEnableFP && mimicClaudeCode {
 		body = syncBillingHeaderVersion(body, ctFingerprint.UserAgent)
 	}
 	if ctEnableCCH {
@@ -8855,8 +8860,9 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// OAuth 账号：应用指纹到请求头（受设置开关控制）
-	if ctEnableFP && ctFingerprint != nil {
+	// OAuth 账号：应用指纹到请求头（受设置开关控制）。
+	// 真 Claude Code CLI 直接透传：跳过，让客户端原始 UA / x-stainless-* 原样上行。
+	if ctEnableFP && ctFingerprint != nil && mimicClaudeCode {
 		s.identityService.ApplyFingerprint(req, ctFingerprint)
 	}
 
