@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -10,89 +12,164 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestSyncBillingHeaderVersion(t *testing.T) {
-	tests := []struct {
-		name      string
-		body      string
-		userAgent string
-		wantSub   string // substring expected in result
-		unchanged bool   // expect body to remain the same
-	}{
-		{
-			// Unknown version (not in officialBuildHash): preserve client suffix,
-			// only replace the X.Y.Z portion.
-			name:      "unknown version preserves client suffix",
-			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.81.df2; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}],"messages":[]}`,
-			userAgent: "claude-cli/2.1.22 (external, cli)",
-			wantSub:   "cc_version=2.1.22.df2",
-		},
-		{
-			name:      "no billing header in system",
-			body:      `{"system":[{"type":"text","text":"You are Claude Code."}],"messages":[]}`,
-			userAgent: "claude-cli/2.1.22",
-			unchanged: true,
-		},
-		{
-			name:      "no system field",
-			body:      `{"messages":[]}`,
-			userAgent: "claude-cli/2.1.22",
-			unchanged: true,
-		},
-		{
-			name:      "user-agent without version",
-			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.81; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
-			userAgent: "Mozilla/5.0",
-			unchanged: true,
-		},
-		{
-			name:      "empty user-agent",
-			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.81; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
-			userAgent: "",
-			unchanged: true,
-		},
-		{
-			name:      "version already matches",
-			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.22; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
-			userAgent: "claude-cli/2.1.22",
-			unchanged: true,
-		},
-		{
-			// 2.1.107 known official build-hash: enforce .c33 regardless of
-			// what the client sends (prevents non-official-CLI fingerprint leak).
-			name:      "enforces 2.1.107 official build-hash",
-			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.107.c33; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
-			userAgent: "claude-cli/2.1.107 (external, cli)",
-			wantSub:   "cc_version=2.1.107.c33",
-		},
-		{
-			// Non-official client suffix on known version: rewrite to official.
-			name:      "rewrites 2.1.110 non-official suffix to .610",
-			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.110.44f; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
-			userAgent: "claude-cli/2.1.110 (external, cli)",
-			wantSub:   "cc_version=2.1.110.610",
-		},
-		{
-			// Cross-version desync: body has 2.1.104.xxx, UA is 2.1.110 —
-			// rewrite both version AND suffix to official 2.1.110.610.
-			name:      "rewrites mismatched version to official 2.1.110.610",
-			body:      `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.104.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`,
-			userAgent: "claude-cli/2.1.110 (external, cli)",
-			wantSub:   "cc_version=2.1.110.610",
-		},
-	}
+// sha256Prefix3 is a reference implementation of the suffix hash used by
+// tests to independently verify computeBillingHeaderSuffix output.
+func sha256Prefix3(input string) string {
+	sum := sha256.Sum256([]byte(input))
+	return hex.EncodeToString(sum[:])[:3]
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := syncBillingHeaderVersion([]byte(tt.body), tt.userAgent)
-			if tt.unchanged {
-				assert.Equal(t, tt.body, string(result), "body should remain unchanged")
-			} else {
-				assert.Contains(t, string(result), tt.wantSub)
-				// Ensure old semver is gone
-				assert.NotContains(t, string(result), "cc_version=2.1.81")
-			}
-		})
-	}
+func TestComputeBillingHeaderSuffix(t *testing.T) {
+	t.Run("reference example from CLI v2.1.77 spec", func(t *testing.T) {
+		// Documented algorithm:
+		//   first user text: "Hello, how are you?"
+		//   chars at [4,7,20]: 'o', 'h', '0' (pos 20 missing -> default)
+		//   sha256("59cf53e54c78" + "oh0" + "2.1.77")[:3] = "b88"
+		body := []byte(`{"messages":[{"role":"user","content":"Hello, how are you?"}]}`)
+		assert.Equal(t, "b88", computeBillingHeaderSuffix(body, "2.1.77"))
+	})
+
+	t.Run("content as array uses last text block", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"Hello, how are you?"}]}]}`)
+		assert.Equal(t, "b88", computeBillingHeaderSuffix(body, "2.1.77"))
+	})
+
+	t.Run("array with system-reminder prefix blocks samples last (real) block", func(t *testing.T) {
+		// CLI prepends <system-reminder> blocks to every user turn; the real
+		// user input is the trailing block. The suffix must sample that one.
+		body := []byte(`{"messages":[{"role":"user","content":[
+			{"type":"text","text":"<system-reminder>\nirrelevant prefix\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nanother prefix block here\n</system-reminder>"},
+			{"type":"text","text":"Hello, how are you?"}
+		]}]}`)
+		assert.Equal(t, "b88", computeBillingHeaderSuffix(body, "2.1.77"))
+	})
+
+	t.Run("matches real CLI capture 2.1.114 / 你好 -> 069", func(t *testing.T) {
+		// Verified against capture 004_204859 (first user message = 4
+		// system-reminder blocks + "你好"). Expected cc_version=2.1.114.069.
+		body := []byte(`{"messages":[{"role":"user","content":[
+			{"type":"text","text":"<system-reminder>\ntools\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nmcp\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nskills\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\ncontext\n</system-reminder>"},
+			{"type":"text","text":"你好"}
+		]}]}`)
+		assert.Equal(t, "069", computeBillingHeaderSuffix(body, "2.1.114"))
+	})
+
+	t.Run("ignores later user turns - uses only first user message", func(t *testing.T) {
+		// Verified against capture 005_210245: even in a multi-turn session,
+		// the suffix is derived from messages[0] only, not the latest user
+		// turn. Both capture 004 (1 turn) and 005 (3 turns, same first turn)
+		// produced cc_version=2.1.114.069.
+		body := []byte(`{"messages":[
+			{"role":"user","content":[{"type":"text","text":"你好"}]},
+			{"role":"assistant","content":[{"type":"text","text":"hi"}]},
+			{"role":"user","content":[{"type":"text","text":"你能做什么呢"}]}
+		]}`)
+		assert.Equal(t, "069", computeBillingHeaderSuffix(body, "2.1.114"))
+	})
+
+	t.Run("skips non-user messages", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"assistant","content":"ignored"},{"role":"user","content":"Hello, how are you?"}]}`)
+		assert.Equal(t, "b88", computeBillingHeaderSuffix(body, "2.1.77"))
+	})
+
+	t.Run("empty messages defaults all chars to '0'", func(t *testing.T) {
+		body := []byte(`{"messages":[]}`)
+		expected := sha256Prefix3(billingHeaderSuffixSalt + "000" + "2.1.110")
+		assert.Equal(t, expected, computeBillingHeaderSuffix(body, "2.1.110"))
+	})
+
+	t.Run("missing messages field defaults all chars to '0'", func(t *testing.T) {
+		body := []byte(`{}`)
+		expected := sha256Prefix3(billingHeaderSuffixSalt + "000" + "2.1.110")
+		assert.Equal(t, expected, computeBillingHeaderSuffix(body, "2.1.110"))
+	})
+
+	t.Run("short text pads missing positions with '0'", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+		// runes: 'h','i' (len 2). Positions 4,7,20 all out of range -> "000".
+		expected := sha256Prefix3(billingHeaderSuffixSalt + "000" + "2.1.110")
+		assert.Equal(t, expected, computeBillingHeaderSuffix(body, "2.1.110"))
+	})
+
+	t.Run("user content with only non-text blocks yields empty text", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"y"}]}]}`)
+		expected := sha256Prefix3(billingHeaderSuffixSalt + "000" + "2.1.110")
+		assert.Equal(t, expected, computeBillingHeaderSuffix(body, "2.1.110"))
+	})
+
+	t.Run("suffix changes with version", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":"Hello, how are you?"}]}`)
+		s110 := computeBillingHeaderSuffix(body, "2.1.110")
+		s113 := computeBillingHeaderSuffix(body, "2.1.113")
+		assert.NotEqual(t, s110, s113)
+	})
+
+	t.Run("suffix changes when sampled positions differ", func(t *testing.T) {
+		// Only positions 4, 7, 20 are sampled. Vary those to see a difference.
+		body1 := []byte(`{"messages":[{"role":"user","content":"abcd-ef-hijklmnopqrs-uvw"}]}`)
+		body2 := []byte(`{"messages":[{"role":"user","content":"abcdXefXhijklmnopqrsXuvw"}]}`)
+		s1 := computeBillingHeaderSuffix(body1, "2.1.110")
+		s2 := computeBillingHeaderSuffix(body2, "2.1.110")
+		assert.NotEqual(t, s1, s2)
+	})
+}
+
+func TestSyncBillingHeaderVersion(t *testing.T) {
+	t.Run("no billing header in system - unchanged", func(t *testing.T) {
+		body := `{"system":[{"type":"text","text":"You are Claude Code."}],"messages":[]}`
+		result := syncBillingHeaderVersion([]byte(body), "claude-cli/2.1.22")
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("no system field - unchanged", func(t *testing.T) {
+		body := `{"messages":[]}`
+		result := syncBillingHeaderVersion([]byte(body), "claude-cli/2.1.22")
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("user-agent without version - unchanged", func(t *testing.T) {
+		body := `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.81; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`
+		result := syncBillingHeaderVersion([]byte(body), "Mozilla/5.0")
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("empty user-agent - unchanged", func(t *testing.T) {
+		body := `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.81; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`
+		result := syncBillingHeaderVersion([]byte(body), "")
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("rewrites version and recomputes suffix dynamically", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.104.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"Hello, how are you?"}]}`)
+		result := syncBillingHeaderVersion(body, "claude-cli/2.1.110 (external, cli)")
+		expectedSuffix := computeBillingHeaderSuffix(body, "2.1.110")
+		assert.Contains(t, string(result), "cc_version=2.1.110."+expectedSuffix)
+		assert.NotContains(t, string(result), "cc_version=2.1.104")
+	})
+
+	t.Run("matches reference spec for 2.1.77 / Hello example", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.81.df2; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"Hello, how are you?"}]}`)
+		result := syncBillingHeaderVersion(body, "claude-cli/2.1.77")
+		assert.Contains(t, string(result), "cc_version=2.1.77.b88")
+	})
+
+	t.Run("adds suffix when body omits one", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.22; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`)
+		result := syncBillingHeaderVersion(body, "claude-cli/2.1.22")
+		expectedSuffix := computeBillingHeaderSuffix(body, "2.1.22")
+		assert.Contains(t, string(result), "cc_version=2.1.22."+expectedSuffix)
+	})
+
+	t.Run("rewrites 2.1.113 with dynamic suffix", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.110.610; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"Hello, how are you?"}]}`)
+		result := syncBillingHeaderVersion(body, "claude-cli/2.1.113 (external, cli)")
+		expectedSuffix := computeBillingHeaderSuffix(body, "2.1.113")
+		assert.Contains(t, string(result), "cc_version=2.1.113."+expectedSuffix)
+	})
 }
 
 func TestSignBillingHeaderCCH(t *testing.T) {
