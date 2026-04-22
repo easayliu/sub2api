@@ -5819,6 +5819,12 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 				}
 			}
 
+			// 3. Normalize the Claude Code system-prompt env block (Platform /
+			// OS Version / Shell). Gated on fingerprint unification so it stays
+			// in sync with X-Stainless-OS/Arch rewrites.
+			if enableFP {
+				body = s.identityService.RewriteEnvSection(body, fp)
+			}
 		}
 	}
 
@@ -5874,6 +5880,11 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// 仅 mimic 客户端或非 OAuth 路径需要应用指纹。
 	if fingerprint != nil && (mimicClaudeCode || tokenType != "oauth") {
 		s.identityService.ApplyFingerprint(req, fingerprint)
+	} else if fingerprint != nil && enableFP {
+		// Real Claude Code CLI passthrough path: keep UA / cc_version verbatim
+		// but still overwrite X-Stainless-OS/Arch so they match the locked Mac
+		// profile used in the rewritten system-prompt env block.
+		s.identityService.ApplyOSFingerprint(req, fingerprint)
 	}
 
 	// 确保必要的headers存在（保持原始大小写）
@@ -8822,6 +8833,11 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 					}
 				}
 			}
+			// Normalize the Claude Code system-prompt env block (Platform /
+			// OS Version / Shell) to match the locked Mac profile.
+			if ctEnableFP {
+				body = s.identityService.RewriteEnvSection(body, fp)
+			}
 		}
 	}
 
@@ -8860,10 +8876,16 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// OAuth 账号：应用指纹到请求头（受设置开关控制）。
-	// 真 Claude Code CLI 直接透传：跳过，让客户端原始 UA / x-stainless-* 原样上行。
-	if ctEnableFP && ctFingerprint != nil && mimicClaudeCode {
-		s.identityService.ApplyFingerprint(req, ctFingerprint)
+	// OAuth accounts: apply the cached fingerprint to request headers, gated
+	// by the fingerprint-unification setting. Real Claude Code CLI traffic is
+	// passed through (UA / Runtime stay verbatim) but X-Stainless-OS/Arch are
+	// still overwritten so they match the system-prompt env block.
+	if ctEnableFP && ctFingerprint != nil {
+		if mimicClaudeCode {
+			s.identityService.ApplyFingerprint(req, ctFingerprint)
+		} else {
+			s.identityService.ApplyOSFingerprint(req, ctFingerprint)
+		}
 	}
 
 	// 确保必要的 headers 存在（保持原始大小写）

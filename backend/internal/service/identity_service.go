@@ -22,9 +22,29 @@ import (
 var (
 	// 匹配 User-Agent 版本号: xxx/x.y.z
 	userAgentVersionRegex = regexp.MustCompile(`/(\d+)\.(\d+)\.(\d+)`)
+
+	// Matches a single env-block line like `  - Platform: darwin`. The capture
+	// group keeps the prefix (leading whitespace + dash + key + colon + space)
+	// so the replacement preserves the original indentation.
+	//
+	// Intra-line whitespace is restricted to `[ \t]` rather than `\s` because
+	// in RE2 `\s` includes `\n`, which would let `\s+` span a blank value line
+	// and consume the following line entirely (e.g. an empty `Platform:` line
+	// would eat the subsequent `Shell:` line).
+	envPlatformLineRegex  = regexp.MustCompile(`(?m)^([ \t]*-[ \t]+Platform:[ \t]+)[^\r\n]*`)
+	envOSVersionLineRegex = regexp.MustCompile(`(?m)^([ \t]*-[ \t]+OS Version:[ \t]+)[^\r\n]*`)
+	envShellLineRegex     = regexp.MustCompile(`(?m)^([ \t]*-[ \t]+Shell:[ \t]+)[^\r\n]*`)
 )
 
-// 默认指纹值（当客户端未提供时使用）
+// envBlockSentinel marks the Claude Code system-prompt env block. Rewriting is
+// gated on this substring to avoid clobbering unrelated text that happens to
+// contain `Platform:` or similar tokens.
+const envBlockSentinel = "You have been invoked in the following environment:"
+
+// defaultFingerprint is the fallback value used when the client does not
+// provide a header. OS/Arch and Prompt* fields are additionally force-locked
+// to the Mac profile on every request regardless of the client platform, so
+// the system-prompt env block and x-stainless-* headers stay in sync.
 var defaultFingerprint = Fingerprint{
 	UserAgent:               "claude-cli/2.1.107 (external, cli)",
 	StainlessLang:           "js",
@@ -33,6 +53,9 @@ var defaultFingerprint = Fingerprint{
 	StainlessArch:           "arm64",
 	StainlessRuntime:        "node",
 	StainlessRuntimeVersion: "v24.3.0",
+	PromptPlatform:          "darwin",
+	PromptOSVersion:         "Darwin 25.3.0",
+	PromptShell:             "zsh",
 }
 
 // Fingerprint represents account fingerprint data
@@ -45,7 +68,13 @@ type Fingerprint struct {
 	StainlessArch           string
 	StainlessRuntime        string
 	StainlessRuntimeVersion string
-	UpdatedAt               int64 `json:",omitempty"` // Unix timestamp，用于判断是否需要续期TTL
+	// PromptPlatform / PromptOSVersion / PromptShell are rewritten into the
+	// Claude Code system prompt env block. They are always the locked Mac
+	// profile values; never sourced from the inbound client.
+	PromptPlatform  string
+	PromptOSVersion string
+	PromptShell     string
+	UpdatedAt       int64 `json:",omitempty"` // Unix timestamp，用于判断是否需要续期TTL
 }
 
 // IdentityCache defines cache operations for identity service
@@ -79,6 +108,13 @@ func (s *IdentityService) GetOrCreateFingerprint(ctx context.Context, accountID 
 	cached, err := s.cache.GetFingerprint(ctx, accountID)
 	if err == nil && cached != nil {
 		needWrite := false
+
+		// Migrate cached fingerprints written before OS/Arch/Prompt* lock was
+		// introduced. Any mismatch against the locked Mac profile is corrected
+		// in place so existing accounts converge on first request.
+		if applyLockedProfile(cached) {
+			needWrite = true
+		}
 
 		// 检查客户端的user-agent是否是更新版本
 		clientUA := headers.Get("User-Agent")
@@ -129,13 +165,21 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fin
 		fp.UserAgent = defaultFingerprint.UserAgent
 	}
 
-	// 获取x-stainless-*头，如果没有则使用默认值
+	// Read x-stainless-* headers, falling back to defaults when absent.
 	fp.StainlessLang = getHeaderOrDefault(headers, "X-Stainless-Lang", defaultFingerprint.StainlessLang)
 	fp.StainlessPackageVersion = getHeaderOrDefault(headers, "X-Stainless-Package-Version", defaultFingerprint.StainlessPackageVersion)
-	fp.StainlessOS = getHeaderOrDefault(headers, "X-Stainless-OS", defaultFingerprint.StainlessOS)
-	fp.StainlessArch = getHeaderOrDefault(headers, "X-Stainless-Arch", defaultFingerprint.StainlessArch)
+	// OS/Arch are globally locked to the Mac profile, not sourced from the client,
+	// so they stay in sync with the rewritten system-prompt env block no matter
+	// which platform the client is running on.
+	fp.StainlessOS = defaultFingerprint.StainlessOS
+	fp.StainlessArch = defaultFingerprint.StainlessArch
 	fp.StainlessRuntime = getHeaderOrDefault(headers, "X-Stainless-Runtime", defaultFingerprint.StainlessRuntime)
 	fp.StainlessRuntimeVersion = getHeaderOrDefault(headers, "X-Stainless-Runtime-Version", defaultFingerprint.StainlessRuntimeVersion)
+
+	// Prompt env fields are always the locked Mac profile.
+	fp.PromptPlatform = defaultFingerprint.PromptPlatform
+	fp.PromptOSVersion = defaultFingerprint.PromptOSVersion
+	fp.PromptShell = defaultFingerprint.PromptShell
 
 	return fp
 }
@@ -149,13 +193,48 @@ func mergeHeadersIntoFingerprint(fp *Fingerprint, headers http.Header) {
 	if ua := headers.Get("User-Agent"); ua != "" {
 		fp.UserAgent = ua
 	}
-	// X-Stainless-* 头：仅在请求中实际携带时才更新，否则保留缓存值
+	// X-Stainless-* headers: update only when present in the request, otherwise
+	// keep the cached value. Exception: OS/Arch are always pinned to the Mac
+	// profile and never drift with the client.
 	mergeHeader(headers, "X-Stainless-Lang", &fp.StainlessLang)
 	mergeHeader(headers, "X-Stainless-Package-Version", &fp.StainlessPackageVersion)
-	mergeHeader(headers, "X-Stainless-OS", &fp.StainlessOS)
-	mergeHeader(headers, "X-Stainless-Arch", &fp.StainlessArch)
+	fp.StainlessOS = defaultFingerprint.StainlessOS
+	fp.StainlessArch = defaultFingerprint.StainlessArch
 	mergeHeader(headers, "X-Stainless-Runtime", &fp.StainlessRuntime)
 	mergeHeader(headers, "X-Stainless-Runtime-Version", &fp.StainlessRuntimeVersion)
+
+	// Prompt env fields are immutable — always the locked Mac profile.
+	fp.PromptPlatform = defaultFingerprint.PromptPlatform
+	fp.PromptOSVersion = defaultFingerprint.PromptOSVersion
+	fp.PromptShell = defaultFingerprint.PromptShell
+}
+
+// applyLockedProfile overwrites the fingerprint fields that are globally
+// locked to the Mac profile (OS, Arch, Prompt env fields). Returns true if
+// any field was changed, so the caller can persist the migration.
+func applyLockedProfile(fp *Fingerprint) bool {
+	changed := false
+	if fp.StainlessOS != defaultFingerprint.StainlessOS {
+		fp.StainlessOS = defaultFingerprint.StainlessOS
+		changed = true
+	}
+	if fp.StainlessArch != defaultFingerprint.StainlessArch {
+		fp.StainlessArch = defaultFingerprint.StainlessArch
+		changed = true
+	}
+	if fp.PromptPlatform != defaultFingerprint.PromptPlatform {
+		fp.PromptPlatform = defaultFingerprint.PromptPlatform
+		changed = true
+	}
+	if fp.PromptOSVersion != defaultFingerprint.PromptOSVersion {
+		fp.PromptOSVersion = defaultFingerprint.PromptOSVersion
+		changed = true
+	}
+	if fp.PromptShell != defaultFingerprint.PromptShell {
+		fp.PromptShell = defaultFingerprint.PromptShell
+		changed = true
+	}
+	return changed
 }
 
 // mergeHeader 如果请求头中存在该字段则更新目标值，否则保留原值
@@ -203,6 +282,23 @@ func (s *IdentityService) ApplyFingerprint(req *http.Request, fp *Fingerprint) {
 	}
 	if fp.StainlessRuntimeVersion != "" {
 		setHeaderRaw(req.Header, "X-Stainless-Runtime-Version", fp.StainlessRuntimeVersion)
+	}
+}
+
+// ApplyOSFingerprint overwrites only X-Stainless-OS and X-Stainless-Arch,
+// leaving UA / Runtime / PackageVersion untouched. Used on the real-Claude-
+// Code-CLI passthrough path where UA / cc_version must stay verbatim but
+// OS / Arch still need to match the locked Mac profile so they stay in sync
+// with the rewritten system-prompt env block.
+func (s *IdentityService) ApplyOSFingerprint(req *http.Request, fp *Fingerprint) {
+	if fp == nil {
+		return
+	}
+	if fp.StainlessOS != "" {
+		setHeaderRaw(req.Header, "X-Stainless-OS", fp.StainlessOS)
+	}
+	if fp.StainlessArch != "" {
+		setHeaderRaw(req.Header, "X-Stainless-Arch", fp.StainlessArch)
 	}
 }
 
@@ -338,6 +434,74 @@ func (s *IdentityService) RewriteUserIDWithMasking(ctx context.Context, body []b
 		return newBody, nil
 	}
 	return maskedBody, nil
+}
+
+// RewriteEnvSection normalizes the Claude Code system-prompt env block
+// (Platform / OS Version / Shell lines) so upstream sees a consistent
+// client-OS picture regardless of the actual client platform. Only text
+// blocks containing the env sentinel are touched. Returns the original
+// body on any parse failure or when no change is needed.
+func (s *IdentityService) RewriteEnvSection(body []byte, fp *Fingerprint) []byte {
+	if len(body) == 0 || fp == nil {
+		return body
+	}
+	if fp.PromptPlatform == "" && fp.PromptOSVersion == "" && fp.PromptShell == "" {
+		return body
+	}
+
+	systemField := gjson.GetBytes(body, "system")
+	if !systemField.Exists() {
+		return body
+	}
+
+	// Claude Code sends system as an array of {type, text} blocks.
+	// The env block typically lives in the last block.
+	if !systemField.IsArray() {
+		return body
+	}
+
+	result := body
+	for i, block := range systemField.Array() {
+		if block.Type != gjson.JSON {
+			continue
+		}
+		textResult := block.Get("text")
+		if !textResult.Exists() || textResult.Type != gjson.String {
+			continue
+		}
+		orig := textResult.String()
+		if !strings.Contains(orig, envBlockSentinel) {
+			continue
+		}
+		rewritten := applyEnvLineRewrites(orig, fp)
+		if rewritten == orig {
+			continue
+		}
+		newBody, err := sjson.SetBytes(result, fmt.Sprintf("system.%d.text", i), rewritten)
+		if err != nil {
+			logger.LegacyPrintf("service.identity", "Warning: failed to rewrite system[%d].text env block: %v", i, err)
+			continue
+		}
+		result = newBody
+	}
+	return result
+}
+
+// applyEnvLineRewrites replaces Platform / OS Version / Shell lines inside
+// a single system-prompt text block. Each field is optional; empty values
+// skip the corresponding substitution.
+func applyEnvLineRewrites(text string, fp *Fingerprint) string {
+	out := text
+	if fp.PromptPlatform != "" {
+		out = envPlatformLineRegex.ReplaceAllString(out, "${1}"+fp.PromptPlatform)
+	}
+	if fp.PromptOSVersion != "" {
+		out = envOSVersionLineRegex.ReplaceAllString(out, "${1}"+fp.PromptOSVersion)
+	}
+	if fp.PromptShell != "" {
+		out = envShellLineRegex.ReplaceAllString(out, "${1}"+fp.PromptShell)
+	}
+	return out
 }
 
 // generateRandomUUID 生成随机 UUID v4 格式字符串
