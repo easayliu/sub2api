@@ -1274,7 +1274,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		if group != nil {
 			groupPlatform = group.Platform
 		}
-		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] select entry: group_id=%v group_platform=%s model=%s session=%s sticky_account=%d load_batch=%v concurrency=%v",
+		logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] select entry: group_id=%v group_platform=%s model=%s session=%s sticky_account=%d load_batch=%v concurrency=%v",
 			derefGroupID(groupID), groupPlatform, requestedModel, shortSessionHash(sessionHash), stickyAccountID, cfg.LoadBatchEnabled, s.concurrencyService != nil)
 	}
 
@@ -1334,7 +1334,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 	preferOAuth := platform == PlatformGemini
 	if s.debugModelRoutingEnabled() && platform == PlatformAnthropic && requestedModel != "" {
-		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] load-aware enabled: group_id=%v model=%s session=%s platform=%s", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), platform)
+		logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] load-aware enabled: group_id=%v model=%s session=%s platform=%s", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), platform)
 	}
 
 	accounts, useMixed, err := s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
@@ -1366,7 +1366,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	if group != nil && requestedModel != "" && group.Platform == PlatformAnthropic {
 		routingAccountIDs = group.GetRoutingAccountIDs(requestedModel)
 		if s.debugModelRoutingEnabled() {
-			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] context group routing: group_id=%d model=%s enabled=%v rules=%d matched_ids=%v session=%s sticky_account=%d",
+			logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] context group routing: group_id=%d model=%s enabled=%v rules=%d matched_ids=%v session=%s sticky_account=%d",
 				group.ID, requestedModel, group.ModelRoutingEnabled, len(group.ModelRouting), routingAccountIDs, shortSessionHash(sessionHash), stickyAccountID)
 			if len(routingAccountIDs) == 0 && group.ModelRoutingEnabled && len(group.ModelRouting) > 0 {
 				keys := make([]string, 0, len(group.ModelRouting))
@@ -1378,7 +1378,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				if len(keys) > maxKeys {
 					keys = keys[:maxKeys]
 				}
-				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] context group routing miss: group_id=%d model=%s patterns(sample)=%v", group.ID, requestedModel, keys)
+				logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] context group routing miss: group_id=%d model=%s patterns(sample)=%v", group.ID, requestedModel, keys)
 			}
 		}
 	}
@@ -1433,11 +1433,11 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 
 		if s.debugModelRoutingEnabled() {
-			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed candidates: group_id=%v model=%s routed=%d candidates=%d filtered(excluded=%d missing=%d unsched=%d platform=%d model_scope=%d model_mapping=%d window_cost=%d)",
+			logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] routed candidates: group_id=%v model=%s routed=%d candidates=%d filtered(excluded=%d missing=%d unsched=%d platform=%d model_scope=%d model_mapping=%d window_cost=%d)",
 				derefGroupID(groupID), requestedModel, len(routingAccountIDs), len(routingCandidates),
 				filteredExcluded, filteredMissing, filteredUnsched, filteredPlatform, filteredModelScope, filteredModelMapping, filteredWindowCost)
 			if len(modelScopeSkippedIDs) > 0 {
-				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] model_rate_limited accounts skipped: group_id=%v model=%s account_ids=%v",
+				logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] model_rate_limited accounts skipped: group_id=%v model=%s account_ids=%v",
 					derefGroupID(groupID), requestedModel, modelScopeSkippedIDs)
 			}
 		}
@@ -1469,7 +1469,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 									// 继续到负载感知选择
 								} else {
 									if s.debugModelRoutingEnabled() {
-										logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), stickyAccountID)
+										logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), stickyAccountID)
 									}
 									return s.newSelectionResult(ctx, stickyAccount, true, result.ReleaseFunc, nil)
 								}
@@ -1511,12 +1511,12 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							if count, ok := rpmFromPrefetchContext(ctx, stickyAccount.ID); ok {
 								currentRPM = count
 							}
-							logger.LegacyPrintf("service.gateway", "[StickyCacheMiss] reason=%s account_id=%d session=%s current_rpm=%d base_rpm=%d",
+							logger.LegacyPrintf("service.gateway", "[debug] [StickyCacheMiss] reason=%s account_id=%d session=%s current_rpm=%d base_rpm=%d",
 								stickyCacheMissReason, stickyAccountID, shortSessionHash(sessionHash), currentRPM, baseRPM)
 						}
 					} else {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-						logger.LegacyPrintf("service.gateway", "[StickyCacheMiss] reason=account_cleared account_id=%d session=%s current_rpm=0 base_rpm=0",
+						logger.LegacyPrintf("service.gateway", "[debug] [StickyCacheMiss] reason=account_cleared account_id=%d session=%s current_rpm=0 base_rpm=0",
 							stickyAccountID, shortSessionHash(sessionHash))
 					}
 				}
@@ -1580,7 +1580,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, item.account.ID, stickySessionTTL)
 						}
 						if s.debugModelRoutingEnabled() {
-							logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
+							logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
 						}
 						return s.newSelectionResult(ctx, item.account, true, result.ReleaseFunc, nil)
 					}
@@ -1593,7 +1593,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						continue // 会话限制已满，尝试下一个
 					}
 					if s.debugModelRoutingEnabled() {
-						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed wait: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
+						logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] routed wait: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
 					}
 					return s.newSelectionResult(ctx, item.account, false, nil, &AccountWaitPlan{
 						AccountID:      item.account.ID,
@@ -1615,7 +1615,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
 			if !ok && s.debugModelRoutingEnabled() {
-				logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: not in schedulable snapshot",
+				logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: not in schedulable snapshot",
 					shortSessionHash(sessionHash), accountID)
 			}
 			if ok {
@@ -1634,7 +1634,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				g7 := s.isAccountSchedulableForRPM(ctx, account, true)
 				if s.debugModelRoutingEnabled() {
 					logger.LegacyPrintf("service.gateway",
-						"[StickyLayer1.5] session=%s account=%d clear=%v inGroup=%v platform=%v model=%v modelSel=%v quota=%v windowCost=%v rpm=%v",
+						"[debug] [StickyLayer1.5] session=%s account=%d clear=%v inGroup=%v platform=%v model=%v modelSel=%v quota=%v windowCost=%v rpm=%v",
 						shortSessionHash(sessionHash), accountID, clearSticky, g1, g2, g3, g4, g5, g6, g7)
 				}
 				// Gate check failed: clear stale sticky binding so Layer 2
@@ -1643,7 +1643,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				if !clearSticky && (!g1 || !g2 || !g3 || !g4 || !g5 || !g6 || !g7) {
 					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					if s.debugModelRoutingEnabled() {
-						logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: gate_failed, cleared stale binding",
+						logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: gate_failed, cleared stale binding",
 							shortSessionHash(sessionHash), accountID)
 					}
 				}
@@ -1654,7 +1654,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						// Session count limit check
 						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
 							if s.debugModelRoutingEnabled() {
-								logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: session_limit (slot_acquired)",
+								logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: session_limit (slot_acquired)",
 									shortSessionHash(sessionHash), accountID)
 							}
 							result.ReleaseFunc() // 释放槽位，继续到 Layer 2
@@ -1663,7 +1663,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								_ = s.cache.RefreshSessionTTL(ctx, derefGroupID(groupID), sessionHash, stickySessionTTL)
 							}
 							if s.debugModelRoutingEnabled() {
-								logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d HIT",
+								logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d HIT",
 									shortSessionHash(sessionHash), accountID)
 							}
 							return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
@@ -1673,7 +1673,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						if result != nil {
 							acquired = result.Acquired
 						}
-						logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d slot_acquire err=%v acquired=%v",
+						logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d slot_acquire err=%v acquired=%v",
 							shortSessionHash(sessionHash), accountID, err, acquired)
 					}
 
@@ -1683,14 +1683,14 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						// Session count limit check (wait plan also requires session quota)
 						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
 							if s.debugModelRoutingEnabled() {
-								logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: session_limit (wait_plan)",
+								logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: session_limit (wait_plan)",
 									shortSessionHash(sessionHash), accountID)
 							}
 							// 会话限制已满，继续到 Layer 2
 							// Session limit full, continue to Layer 2
 						} else {
 							if s.debugModelRoutingEnabled() {
-								logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d WAIT_PLAN",
+								logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d WAIT_PLAN",
 									shortSessionHash(sessionHash), accountID)
 							}
 							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
@@ -1701,7 +1701,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							})
 						}
 					} else if s.debugModelRoutingEnabled() {
-						logger.LegacyPrintf("service.gateway", "[StickyLayer1.5] session=%s account=%d MISS: wait_queue_full waiting=%d max=%d",
+						logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: wait_queue_full waiting=%d max=%d",
 							shortSessionHash(sessionHash), accountID, waitingCount, cfg.StickySessionMaxWaiting)
 					}
 				}
@@ -1913,20 +1913,20 @@ func (s *GatewayService) routingAccountIDsForRequest(ctx context.Context, groupI
 	group, err := s.resolveGroupByID(ctx, *groupID)
 	if err != nil || group == nil {
 		if s.debugModelRoutingEnabled() {
-			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] resolve group failed: group_id=%v model=%s platform=%s err=%v", derefGroupID(groupID), requestedModel, platform, err)
+			logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] resolve group failed: group_id=%v model=%s platform=%s err=%v", derefGroupID(groupID), requestedModel, platform, err)
 		}
 		return nil
 	}
 	// Preserve existing behavior: model routing only applies to anthropic groups.
 	if group.Platform != PlatformAnthropic {
 		if s.debugModelRoutingEnabled() {
-			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] skip: non-anthropic group platform: group_id=%d group_platform=%s model=%s", group.ID, group.Platform, requestedModel)
+			logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] skip: non-anthropic group platform: group_id=%d group_platform=%s model=%s", group.ID, group.Platform, requestedModel)
 		}
 		return nil
 	}
 	ids := group.GetRoutingAccountIDs(requestedModel)
 	if s.debugModelRoutingEnabled() {
-		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routing lookup: group_id=%d model=%s enabled=%v rules=%d matched_ids=%v",
+		logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] routing lookup: group_id=%d model=%s enabled=%v rules=%d matched_ids=%v",
 			group.ID, requestedModel, group.ModelRoutingEnabled, len(group.ModelRouting), ids)
 	}
 	return ids
@@ -2788,7 +2788,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	// so switching model can switch upstream account within the same sticky session.
 	if len(routingAccountIDs) > 0 {
 		if s.debugModelRoutingEnabled() {
-			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy routed begin: group_id=%v model=%s platform=%s session=%s routed_ids=%v",
+			logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy routed begin: group_id=%v model=%s platform=%s session=%s routed_ids=%v",
 				derefGroupID(groupID), requestedModel, platform, shortSessionHash(sessionHash), routingAccountIDs)
 		}
 		// 1) Sticky session only applies if the bound account is within the routing set.
@@ -2805,7 +2805,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 						}
 						if !clearSticky && s.isAccountInGroup(account, groupID) && account.Platform == platform && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
 							if s.debugModelRoutingEnabled() {
-								logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
+								logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
 							}
 							return account, nil
 						}
@@ -2903,7 +2903,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 				}
 			}
 			if s.debugModelRoutingEnabled() {
-				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), selected.ID)
+				logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), selected.ID)
 			}
 			return selected, nil
 		}
@@ -3046,7 +3046,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	// ============ Model Routing (legacy path): apply before sticky session ============
 	if len(routingAccountIDs) > 0 {
 		if s.debugModelRoutingEnabled() {
-			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed begin: group_id=%v model=%s platform=%s session=%s routed_ids=%v",
+			logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy mixed routed begin: group_id=%v model=%s platform=%s session=%s routed_ids=%v",
 				derefGroupID(groupID), requestedModel, nativePlatform, shortSessionHash(sessionHash), routingAccountIDs)
 		}
 		// 1) Sticky session only applies if the bound account is within the routing set.
@@ -3064,7 +3064,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 						if !clearSticky && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
 							if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
 								if s.debugModelRoutingEnabled() {
-									logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
+									logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
 								}
 								return account, nil
 							}
@@ -3163,7 +3163,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 				}
 			}
 			if s.debugModelRoutingEnabled() {
-				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), selected.ID)
+				logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy mixed routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), selected.ID)
 			}
 			return selected, nil
 		}
@@ -4162,7 +4162,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		if passthroughModel != "" {
 			if mappedModel := account.GetMappedModel(passthroughModel); mappedModel != passthroughModel {
 				passthroughBody = s.replaceModelInBody(passthroughBody, mappedModel)
-				logger.LegacyPrintf("service.gateway", "Passthrough model mapping: %s -> %s (account: %s)", parsed.Model, mappedModel, account.Name)
+				logger.LegacyPrintf("service.gateway", "[debug] Passthrough model mapping: %s -> %s (account: %s)", parsed.Model, mappedModel, account.Name)
 				passthroughModel = mappedModel
 			}
 		}
@@ -4278,7 +4278,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		// 替换请求体中的模型名
 		body = s.replaceModelInBody(body, mappedModel)
 		reqModel = mappedModel
-		logger.LegacyPrintf("service.gateway", "Model mapping applied: %s -> %s (account: %s, source=%s)", originalModel, mappedModel, account.Name, mappingSource)
+		logger.LegacyPrintf("service.gateway", "[debug] Model mapping applied: %s -> %s (account: %s, source=%s)", originalModel, mappedModel, account.Name, mappingSource)
 	}
 
 	// 获取凭证
@@ -4298,9 +4298,13 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// 解析 TLS 指纹 profile（同一请求生命周期内不变，避免重试循环中重复解析）
 	tlsProfile := s.tlsFPProfileService.ResolveTLSProfile(account)
 
-	// 调试日志：记录即将转发的账号信息
-	logger.LegacyPrintf("service.gateway", "[Forward] Using account: ID=%d Name=%s Platform=%s Type=%s TLSFingerprint=%v Proxy=%s",
-		account.ID, account.Name, account.Platform, account.Type, tlsProfile, proxyURL)
+	// Debug log: record the account selected for this forward.
+	tlsProfileName := "none"
+	if tlsProfile != nil {
+		tlsProfileName = tlsProfile.Name
+	}
+	logger.LegacyPrintf("service.gateway", "[debug] [Forward] Using account: ID=%d Name=%s Platform=%s Type=%s TLSProfile=%s Proxy=%s",
+		account.ID, account.Name, account.Platform, account.Type, tlsProfileName, proxyURL)
 	// Pre-filter: strip empty text blocks (including nested in tool_result) to prevent upstream 400.
 	body = StripEmptyTextBlocks(body)
 
@@ -4788,7 +4792,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 		proxyURL = account.Proxy.URL()
 	}
 
-	logger.LegacyPrintf("service.gateway", "[Anthropic 自动透传] 命中 API Key 透传分支: account=%d name=%s model=%s stream=%v",
+	logger.LegacyPrintf("service.gateway", "[debug] [Anthropic 自动透传] 命中 API Key 透传分支: account=%d name=%s model=%s stream=%v",
 		account.ID, account.Name, input.RequestModel, input.RequestStream)
 
 	if c != nil {
@@ -5414,7 +5418,7 @@ func (s *GatewayService) forwardBedrock(
 		return nil, fmt.Errorf("unsupported bedrock model: %s", reqModel)
 	}
 	if mappedModel != reqModel {
-		logger.LegacyPrintf("service.gateway", "[Bedrock] Model mapping: %s -> %s (account: %s)", reqModel, mappedModel, account.Name)
+		logger.LegacyPrintf("service.gateway", "[debug] [Bedrock] Model mapping: %s -> %s (account: %s)", reqModel, mappedModel, account.Name)
 	}
 
 	betaHeader := ""
@@ -5438,7 +5442,7 @@ func (s *GatewayService) forwardBedrock(
 		proxyURL = account.Proxy.URL()
 	}
 
-	logger.LegacyPrintf("service.gateway", "[Bedrock] 命中 Bedrock 分支: account=%d name=%s model=%s->%s stream=%v",
+	logger.LegacyPrintf("service.gateway", "[debug] [Bedrock] 命中 Bedrock 分支: account=%d name=%s model=%s->%s stream=%v",
 		account.ID, account.Name, reqModel, mappedModel, reqStream)
 
 	// 根据账号类型选择认证方式
