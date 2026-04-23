@@ -42,7 +42,7 @@ import (
 const (
 	claudeAPIURL            = "https://api.anthropic.com/v1/messages?beta=true"
 	claudeAPICountTokensURL = "https://api.anthropic.com/v1/messages/count_tokens?beta=true"
-	stickySessionTTL        = time.Hour // 粘性会话TTL
+	stickySessionTTL        = 48 * time.Hour // 粘性会话TTL（滑动过期，每次命中刷新）
 	defaultMaxLineSize      = 500 * 1024 * 1024
 	// Canonical Claude Code banner. Keep it EXACT (no trailing whitespace/newlines)
 	// to match real Claude CLI traffic as closely as possible. When we need a visual
@@ -661,16 +661,18 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 	}
 
 	// 1. 最高优先级：从 metadata.user_id 提取粘性 key。
-	// 使用 session_id：每个 CLI 会话有唯一的 session_id，用它做粘性 key
-	// 可以让同一会话的所有请求（包括子 agent）路由到同一个 OAuth 账号。
-	// session_id 缺失时回退到 device_id，保持对旧协议/非标准客户端的兼容。
+	// 使用 device_id：Claude CLI 在 agent 模式下每个子 agent 调用都会刷新
+	// session_id，只有 device_id 跨子 agent 稳定。以 device_id 作为主 key
+	// 可以让同一设备上的主会话和子 agent 路由到同一个 OAuth 账号。
+	// session_id 分支当前 parser 不会触达（JSON/legacy 两种格式都要求
+	// device_id 非空），保留作为防御性回退，兼容未来可能放宽的格式。
 	if parsed.MetadataUserID != "" {
 		if uid := ParseMetadataUserID(parsed.MetadataUserID); uid != nil {
-			if uid.SessionID != "" {
-				return uid.SessionID
-			}
 			if uid.DeviceID != "" {
 				return uid.DeviceID
+			}
+			if uid.SessionID != "" {
+				return uid.SessionID
 			}
 		}
 	}
@@ -2440,6 +2442,12 @@ func (s *GatewayService) IncrementAccountRPM(ctx context.Context, accountID int6
 // 仅适用于 Anthropic OAuth/SetupToken 账号
 // sessionID: 会话标识符（使用粘性会话的 hash）
 // 返回 true 表示允许（在限制内或会话已存在），false 表示拒绝（超出限制且是新会话）
+//
+// 注意：sessionID 传入的是 GenerateSessionHash 的返回值。当前主策略以
+// device_id 作为粘性 key（见 GenerateSessionHash），因此这里的"会话
+// 数量"实际计量的是"活跃设备数"——同设备上多个 CLI 窗口、主会话与
+// 子 agent 共用一个名额。MaxSessions/GetSessionIdleTimeoutMinutes 等
+// 配置项的语义需按此理解。
 func (s *GatewayService) checkAndRegisterSession(ctx context.Context, account *Account, sessionID string) bool {
 	// 只检查 Anthropic OAuth/SetupToken 账号
 	if !account.IsAnthropicOAuthOrSetupToken() {

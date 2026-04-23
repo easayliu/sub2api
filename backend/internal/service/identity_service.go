@@ -336,11 +336,13 @@ func (s *IdentityService) RewriteUserID(body []byte, accountID int64, accountUUI
 		return body, nil
 	}
 
-	sessionTail := parsed.SessionID // 原始session UUID
-
-	// 生成新的session hash: SHA256(accountID::sessionTail) -> UUID格式
-	seed := fmt.Sprintf("%d::%s", accountID, sessionTail)
-	newSessionHash := generateUUIDFromSeed(seed)
+	// 保留客户端原始 session_id：Claude CLI 主会话与子 agent 各自携带
+	// 有语义的 session_id（主会话稳定、子 agent 每次刷新），Anthropic 侧
+	// 据此区分真实会话结构。历史上这里做过 SHA256(accountID::session)
+	// 派生以防跨账号关联，但代价是丢失原始会话结构；现在由 device_id 改写
+	// （cachedClientID 覆盖原 device_id）承担跨账号隔离职责，session_id
+	// 可以安全原样保留。如需进一步伪装，启用账号级 session_id_masking。
+	newSessionHash := parsed.SessionID
 
 	// Preserve original wire format (JSON vs legacy) based on what the
 	// client actually sent, instead of relying on fingerprint UA version
@@ -532,19 +534,6 @@ func generateClientID() string {
 		return hex.EncodeToString(h[:])
 	}
 	return hex.EncodeToString(b)
-}
-
-// generateUUIDFromSeed 从种子生成确定性UUID v4格式字符串
-func generateUUIDFromSeed(seed string) string {
-	hash := sha256.Sum256([]byte(seed))
-	bytes := hash[:16]
-
-	// 设置UUID v4版本和变体位
-	bytes[6] = (bytes[6] & 0x0f) | 0x40
-	bytes[8] = (bytes[8] & 0x3f) | 0x80
-
-	return fmt.Sprintf("%x-%x-%x-%x-%x",
-		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
 }
 
 // parseUserAgentVersion 解析user-agent版本号

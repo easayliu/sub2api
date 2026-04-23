@@ -36,10 +36,11 @@ func TestGenerateSessionHash_MetadataHasHighestPriority(t *testing.T) {
 	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", hash, "metadata device_id should have highest priority")
 }
 
-func TestGenerateSessionHash_MetadataSessionIDPriority(t *testing.T) {
+func TestGenerateSessionHash_MetadataDeviceIDPriority(t *testing.T) {
 	svc := &GatewayService{}
 
-	// session_id 优先于 device_id 作为粘性 key
+	// device_id 优先于 session_id：Claude CLI agent 模式下子 agent 每次刷新
+	// session_id，只有 device_id 跨子 agent 稳定，同设备应产生相同 hash。
 	parsed1 := &ParsedRequest{
 		MetadataUserID: `{"device_id":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","account_uuid":"","session_id":"11111111-1111-1111-1111-111111111111"}`,
 		System:         "agent subtask 1",
@@ -59,27 +60,10 @@ func TestGenerateSessionHash_MetadataSessionIDPriority(t *testing.T) {
 
 	h1 := svc.GenerateSessionHash(parsed1)
 	h2 := svc.GenerateSessionHash(parsed2)
-	require.NotEqual(t, h1, h2, "different session_id should produce different hash")
-	require.Equal(t, "11111111-1111-1111-1111-111111111111", h1)
-	require.Equal(t, "22222222-2222-2222-2222-222222222222", h2)
+	require.Equal(t, h1, h2, "same device_id with different session_id should produce same hash")
+	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", h1)
 }
 
-func TestGenerateSessionHash_DeviceIDFallbackWhenNoSessionID(t *testing.T) {
-	svc := &GatewayService{}
-
-	// session_id 缺失时回退到 device_id
-	parsed := &ParsedRequest{
-		MetadataUserID: `{"device_id":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","account_uuid":""}`,
-		System:         "test",
-		HasSystem:      true,
-		Messages: []any{
-			map[string]any{"role": "user", "content": "test"},
-		},
-	}
-
-	h := svc.GenerateSessionHash(parsed)
-	require.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", h)
-}
 
 func TestGenerateSessionHash_MetadataInvalidFallsBackToContentHash(t *testing.T) {
 	svc := &GatewayService{}
