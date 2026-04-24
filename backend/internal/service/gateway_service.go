@@ -1609,6 +1609,11 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 
 			if len(routingAvailable) > 0 {
+				// Sticky-overflow detection: reaching this point with an existing
+				// sticky binding means Layer 1.5 could not honor it. Place
+				// newly-enabled (LastUsedAt==nil) accounts last so they do not
+				// hijack device_id affinity on Layer 2 fallback in routing mode.
+				routingStickyOverflow := sessionHash != "" && stickyAccountID > 0
 				// 排序：优先级 > 负载率 > 最后使用时间
 				sort.SliceStable(routingAvailable, func(i, j int) bool {
 					a, b := routingAvailable[i], routingAvailable[j]
@@ -1620,9 +1625,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					}
 					switch {
 					case a.account.LastUsedAt == nil && b.account.LastUsedAt != nil:
-						return true
+						// Overflow: used accounts first; otherwise original behavior (nil first).
+						return !routingStickyOverflow
 					case a.account.LastUsedAt != nil && b.account.LastUsedAt == nil:
-						return false
+						return routingStickyOverflow
 					case a.account.LastUsedAt == nil && b.account.LastUsedAt == nil:
 						return false
 					default:
@@ -1849,13 +1855,18 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 
 		// 分层过滤选择：优先级 → 负载率 → LRU
+		// Sticky-overflow detection: this Layer 2 path is only reached when an
+		// existing sticky binding could not be honored (Layer 1.5 miss, full
+		// slots+queue, or gate failure). Prefer already-used accounts to keep
+		// device_id affinity stable after newly enabled accounts join the pool.
+		stickyOverflow := sessionHash != "" && stickyAccountID > 0
 		for len(available) > 0 {
 			// 1. 取优先级最小的集合
 			candidates := filterByMinPriority(available)
 			// 2. 取负载率最低的集合
 			candidates = filterByMinLoadRate(candidates)
 			// 3. LRU 选择最久未用的账号
-			selected := selectByLRU(candidates, preferOAuth)
+			selected := selectByLRU(candidates, preferOAuth, stickyOverflow)
 			if selected == nil {
 				break
 			}
@@ -2616,12 +2627,30 @@ func filterByMinLoadRate(accounts []accountWithLoad) []accountWithLoad {
 
 // selectByLRU 从集合中选择最久未用的账号
 // 如果有多个账号具有相同的最小 LastUsedAt，则随机选择一个
-func selectByLRU(accounts []accountWithLoad, preferOAuth bool) *accountWithLoad {
+//
+// preferUsed: when true, accounts with LastUsedAt==nil (newly enabled,
+// never used) are deprioritized — we only fall back to them if no used
+// account is available in the candidate set. Pass true from sticky-overflow
+// paths so freshly enabled accounts do not hijack requests whose device_id
+// already has a binding to an older account.
+func selectByLRU(accounts []accountWithLoad, preferOAuth bool, preferUsed bool) *accountWithLoad {
 	if len(accounts) == 0 {
 		return nil
 	}
 	if len(accounts) == 1 {
 		return &accounts[0]
+	}
+
+	if preferUsed {
+		used := make([]accountWithLoad, 0, len(accounts))
+		for _, acc := range accounts {
+			if acc.account.LastUsedAt != nil {
+				used = append(used, acc)
+			}
+		}
+		if len(used) > 0 {
+			accounts = used
+		}
 	}
 
 	// 1. 找到最小的 LastUsedAt（nil 被视为最小）
