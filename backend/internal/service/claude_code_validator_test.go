@@ -57,6 +57,31 @@ func TestClaudeCodeValidator_NonMessagesPathUAOnly(t *testing.T) {
 	require.True(t, ok)
 }
 
+// count_tokens requests from the CLI do not carry a system prompt or
+// metadata.user_id, so strict Step 4 validation must be skipped once the
+// User-Agent has already proven the caller is a real CLI.
+func TestClaudeCodeValidator_CountTokensBypassWithUA(t *testing.T) {
+	validator := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages/count_tokens", nil)
+	req.Header.Set("User-Agent", "claude-cli/1.2.3 (darwin; arm64)")
+
+	ok := validator.Validate(req, map[string]any{
+		"model": "claude-opus-4-7",
+	})
+	require.True(t, ok)
+}
+
+func TestClaudeCodeValidator_CountTokensRequiresUA(t *testing.T) {
+	validator := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages/count_tokens", nil)
+	req.Header.Set("User-Agent", "curl/8.0.0")
+
+	ok := validator.Validate(req, map[string]any{
+		"model": "claude-opus-4-7",
+	})
+	require.False(t, ok)
+}
+
 func TestExtractVersion(t *testing.T) {
 	v := NewClaudeCodeValidator()
 	tests := []struct {

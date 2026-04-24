@@ -58,6 +58,7 @@ func NewClaudeCodeValidator() *ClaudeCodeValidator {
 //	Step 1: User-Agent 检查 (必需) - 必须是 claude-cli/x.x.x
 //	Step 2: 对于非 messages 路径，只要 UA 匹配就通过
 //	Step 3: 检查 max_tokens=1 + haiku 探测请求绕过（UA 已验证）
+//	Step 3.5: count_tokens 路径绕过（UA 已验证）
 //	Step 4: 对于 messages 路径，进行严格验证：
 //	        - System prompt 相似度检查
 //	        - X-App header 检查
@@ -81,6 +82,15 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	// 这类请求用于 Claude Code 验证 API 连通性，不携带 system prompt
 	if isMaxTokensOneHaiku, ok := IsMaxTokensOneHaikuRequestFromContext(r.Context()); ok && isMaxTokensOneHaiku {
 		return true // 绕过 system prompt 检查，UA 已在 Step 1 验证
+	}
+
+	// Step 3.5: bypass for count_tokens path.
+	// count_tokens is a context-window estimator and does not carry the
+	// full Claude Code system prompt or metadata, so Step 4 strict checks
+	// would always reject it. UA match from Step 1 is sufficient evidence
+	// that this is a real CLI probe.
+	if strings.HasSuffix(path, "/count_tokens") {
+		return true
 	}
 
 	// Step 4: messages 路径，进行严格验证
