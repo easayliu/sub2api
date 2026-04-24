@@ -1613,19 +1613,30 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				// sticky binding means Layer 1.5 could not honor it. Place
 				// newly-enabled (LastUsedAt==nil) accounts last so they do not
 				// hijack device_id affinity on Layer 2 fallback in routing mode.
+				// The used-vs-unused split must come BEFORE load-rate comparison:
+				// a freshly enabled account has LoadRate=0 trivially, so without
+				// this guard it outranks every warm used account purely on load.
 				routingStickyOverflow := sessionHash != "" && stickyAccountID > 0
-				// 排序：优先级 > 负载率 > 最后使用时间
+				// 排序：优先级 > (overflow 时) used 优先 > 负载率 > 最后使用时间
 				sort.SliceStable(routingAvailable, func(i, j int) bool {
 					a, b := routingAvailable[i], routingAvailable[j]
 					if a.account.Priority != b.account.Priority {
 						return a.account.Priority < b.account.Priority
+					}
+					if routingStickyOverflow {
+						aUsed := a.account.LastUsedAt != nil
+						bUsed := b.account.LastUsedAt != nil
+						if aUsed != bUsed {
+							return aUsed
+						}
 					}
 					if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
 						return a.loadInfo.LoadRate < b.loadInfo.LoadRate
 					}
 					switch {
 					case a.account.LastUsedAt == nil && b.account.LastUsedAt != nil:
-						// Overflow: used accounts first; otherwise original behavior (nil first).
+						// Non-overflow original behavior: nil first.
+						// Overflow branches above already partitioned used/unused.
 						return !routingStickyOverflow
 					case a.account.LastUsedAt != nil && b.account.LastUsedAt == nil:
 						return routingStickyOverflow
@@ -1863,8 +1874,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		for len(available) > 0 {
 			// 1. 取优先级最小的集合
 			candidates := filterByMinPriority(available)
-			// 2. 取负载率最低的集合
-			candidates = filterByMinLoadRate(candidates)
+			// 2. 取负载率最低的集合（overflow 时：used-account 优先，避免新账号以
+			//    LoadRate=0 的假象压倒已绑定的 used 账号）
+			candidates = filterByMinLoadRate(candidates, stickyOverflow)
 			// 3. LRU 选择最久未用的账号
 			selected := selectByLRU(candidates, preferOAuth, stickyOverflow)
 			if selected == nil {
@@ -2606,18 +2618,37 @@ func filterByMinPriority(accounts []accountWithLoad) []accountWithLoad {
 }
 
 // filterByMinLoadRate 过滤出负载率最低的账号集合
-func filterByMinLoadRate(accounts []accountWithLoad) []accountWithLoad {
+//
+// preferUsed: when true, accounts with LastUsedAt==nil (newly enabled, never
+// used) are considered only after all used accounts have been ruled out. This
+// keeps a freshly-enabled account whose LoadRate is trivially 0% from beating
+// an already-warm sticky-bound account (whose LoadRate is naturally > 0) in
+// the Layer 2 overflow path. Pair with selectByLRU(preferUsed=true) to fully
+// deprioritize never-used accounts under sticky-overflow conditions.
+func filterByMinLoadRate(accounts []accountWithLoad, preferUsed bool) []accountWithLoad {
 	if len(accounts) == 0 {
 		return accounts
 	}
-	minLoadRate := accounts[0].loadInfo.LoadRate
-	for _, acc := range accounts[1:] {
+	target := accounts
+	if preferUsed {
+		used := make([]accountWithLoad, 0, len(accounts))
+		for _, acc := range accounts {
+			if acc.account.LastUsedAt != nil {
+				used = append(used, acc)
+			}
+		}
+		if len(used) > 0 {
+			target = used
+		}
+	}
+	minLoadRate := target[0].loadInfo.LoadRate
+	for _, acc := range target[1:] {
 		if acc.loadInfo.LoadRate < minLoadRate {
 			minLoadRate = acc.loadInfo.LoadRate
 		}
 	}
-	result := make([]accountWithLoad, 0, len(accounts))
-	for _, acc := range accounts {
+	result := make([]accountWithLoad, 0, len(target))
+	for _, acc := range target {
 		if acc.loadInfo.LoadRate == minLoadRate {
 			result = append(result, acc)
 		}

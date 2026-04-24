@@ -134,7 +134,7 @@ func TestFilterByMinPriority_SelectsMinPriority(t *testing.T) {
 // --- filterByMinLoadRate ---
 
 func TestFilterByMinLoadRate_Empty(t *testing.T) {
-	result := filterByMinLoadRate(nil)
+	result := filterByMinLoadRate(nil, false)
 	require.Nil(t, result)
 }
 
@@ -145,22 +145,55 @@ func TestFilterByMinLoadRate_SelectsMinLoadRate(t *testing.T) {
 		makeAccWithLoad(3, 1, 10, nil, AccountTypeAPIKey),
 		makeAccWithLoad(4, 1, 20, nil, AccountTypeAPIKey),
 	}
-	result := filterByMinLoadRate(accounts)
+	result := filterByMinLoadRate(accounts, false)
 	require.Len(t, result, 2)
 	require.Equal(t, int64(2), result[0].account.ID)
 	require.Equal(t, int64(3), result[1].account.ID)
 }
 
+// TestFilterByMinLoadRate_PreferUsed_StickyOverflow covers the sticky-overflow
+// regression where a freshly-enabled account (LastUsedAt==nil, LoadRate==0)
+// was hijacking device_id traffic from warm accounts whose LoadRate was > 0.
+// With preferUsed=true, used accounts must be preferred even though their
+// load rate is higher.
+func TestFilterByMinLoadRate_PreferUsed_StickyOverflow(t *testing.T) {
+	now := time.Now()
+	// Account 1: freshly enabled, LoadRate 0.
+	// Account 2: warm, LoadRate 30.
+	// Account 3: warm, LoadRate 50.
+	accounts := []accountWithLoad{
+		makeAccWithLoad(1, 1, 0, nil, AccountTypeOAuth),
+		makeAccWithLoad(2, 1, 30, testTimePtr(now.Add(-1*time.Hour)), AccountTypeOAuth),
+		makeAccWithLoad(3, 1, 50, testTimePtr(now.Add(-2*time.Hour)), AccountTypeOAuth),
+	}
+	result := filterByMinLoadRate(accounts, true)
+	require.Len(t, result, 1)
+	require.Equal(t, int64(2), result[0].account.ID, "must prefer warm account with LoadRate 30 over freshly-enabled account with LoadRate 0")
+}
+
+// TestFilterByMinLoadRate_PreferUsed_FallsBackToUnusedWhenNoUsed verifies
+// that when only freshly-enabled accounts exist, preferUsed still picks the
+// minimum-load among them (no stranded candidate set).
+func TestFilterByMinLoadRate_PreferUsed_FallsBackToUnusedWhenNoUsed(t *testing.T) {
+	accounts := []accountWithLoad{
+		makeAccWithLoad(1, 1, 0, nil, AccountTypeOAuth),
+		makeAccWithLoad(2, 1, 20, nil, AccountTypeOAuth),
+	}
+	result := filterByMinLoadRate(accounts, true)
+	require.Len(t, result, 1)
+	require.Equal(t, int64(1), result[0].account.ID)
+}
+
 // --- selectByLRU ---
 
 func TestSelectByLRU_Empty(t *testing.T) {
-	result := selectByLRU(nil, false)
+	result := selectByLRU(nil, false, false)
 	require.Nil(t, result)
 }
 
 func TestSelectByLRU_Single(t *testing.T) {
 	accounts := []accountWithLoad{makeAccWithLoad(1, 1, 10, nil, AccountTypeAPIKey)}
-	result := selectByLRU(accounts, false)
+	result := selectByLRU(accounts, false, false)
 	require.NotNil(t, result)
 	require.Equal(t, int64(1), result.account.ID)
 }
@@ -172,7 +205,7 @@ func TestSelectByLRU_NilLastUsedAtWins(t *testing.T) {
 		makeAccWithLoad(2, 1, 10, nil, AccountTypeAPIKey),
 		makeAccWithLoad(3, 1, 10, testTimePtr(now.Add(-1*time.Hour)), AccountTypeAPIKey),
 	}
-	result := selectByLRU(accounts, false)
+	result := selectByLRU(accounts, false, false)
 	require.NotNil(t, result)
 	require.Equal(t, int64(2), result.account.ID)
 }
@@ -184,7 +217,7 @@ func TestSelectByLRU_EarliestTimeWins(t *testing.T) {
 		makeAccWithLoad(2, 1, 10, testTimePtr(now.Add(-1*time.Hour)), AccountTypeAPIKey),
 		makeAccWithLoad(3, 1, 10, testTimePtr(now.Add(-2*time.Hour)), AccountTypeAPIKey),
 	}
-	result := selectByLRU(accounts, false)
+	result := selectByLRU(accounts, false, false)
 	require.NotNil(t, result)
 	require.Equal(t, int64(3), result.account.ID)
 }
@@ -198,7 +231,7 @@ func TestSelectByLRU_TiePreferOAuth(t *testing.T) {
 		makeAccWithLoad(3, 1, 10, testTimePtr(now.Add(1*time.Hour)), AccountTypeAPIKey),
 	}
 	for i := 0; i < 50; i++ {
-		result := selectByLRU(accounts, true)
+		result := selectByLRU(accounts, true, false)
 		require.NotNil(t, result)
 		require.Equal(t, AccountTypeOAuth, result.account.Type)
 		require.Equal(t, int64(2), result.account.ID)
