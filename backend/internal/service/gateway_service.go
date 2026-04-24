@@ -744,13 +744,16 @@ func (s *GatewayService) BindStickySession(ctx context.Context, groupID *int64, 
 //
 // Behavior:
 //   - No race (won, or winner == self): returns nil, caller keeps its slot.
-//   - Race lost with winner reachable and slot acquirable: releases the
-//     loser's slot, returns a selection pointing at the winner.
-//   - Race lost but winner unreachable (not in snapshot) or full: overwrites
-//     the binding with self so future requests converge (last-writer-wins
-//     fallback), returns nil.
+//   - Race lost with winner reachable, slot acquirable, session registered,
+//     and hydration success: releases loser's slot, returns winner selection.
+//   - Any other lost-race failure (winner missing from snapshot, slot full,
+//     session limit hit, hydration error): returns nil WITHOUT touching the
+//     existing binding. Caller uses its current selection for this request;
+//     future requests retry the winner from Redis.
 //
-// Returns nil when the caller should keep its original selection.
+// The binding is never overwritten here: doing so would destroy legitimate
+// sticky bindings when the winner is temporarily invisible (e.g., scheduler
+// snapshot rebuild after account add) and cause durable drift to new accounts.
 func (s *GatewayService) resolveStickyRaceWinner(
 	ctx context.Context,
 	groupID *int64,
@@ -766,36 +769,31 @@ func (s *GatewayService) resolveStickyRaceWinner(
 	if err != nil || won || winnerID <= 0 || winnerID == selfAccount.ID {
 		return nil
 	}
-	if winnerAccount, ok := accountByID[winnerID]; ok && winnerAccount != nil {
-		winResult, e := s.tryAcquireAccountSlot(ctx, winnerID, winnerAccount.Concurrency)
-		if e == nil && winResult != nil && winResult.Acquired {
-			// Refresh winner's session registration (idempotent). If it fails
-			// (winner hit session limit after its own registration expired),
-			// release winner slot and fall through to self-overwrite.
-			if !s.checkAndRegisterSession(ctx, winnerAccount, sessionHash) {
-				if winResult.ReleaseFunc != nil {
-					winResult.ReleaseFunc()
-				}
-			} else {
-				// Build redirect BEFORE releasing loser's slot: if hydration fails
-				// we must leave the loser slot intact so the caller can keep using it.
-				redirected, rerr := s.newSelectionResult(ctx, winnerAccount, true, winResult.ReleaseFunc, nil)
-				if rerr == nil {
-					if selfSlot != nil && selfSlot.ReleaseFunc != nil {
-						selfSlot.ReleaseFunc()
-					}
-					return redirected
-				}
-				if winResult.ReleaseFunc != nil {
-					winResult.ReleaseFunc()
-				}
-			}
-		}
+	winnerAccount, ok := accountByID[winnerID]
+	if !ok || winnerAccount == nil {
+		return nil
 	}
-	// Winner unusable: overwrite binding with self so future requests converge.
-	// Loser still holds its slot, caller continues with its original selection.
-	_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selfAccount.ID, stickySessionTTL)
-	return nil
+	winResult, e := s.tryAcquireAccountSlot(ctx, winnerID, winnerAccount.Concurrency)
+	if e != nil || winResult == nil || !winResult.Acquired {
+		return nil
+	}
+	if !s.checkAndRegisterSession(ctx, winnerAccount, sessionHash) {
+		if winResult.ReleaseFunc != nil {
+			winResult.ReleaseFunc()
+		}
+		return nil
+	}
+	redirected, rerr := s.newSelectionResult(ctx, winnerAccount, true, winResult.ReleaseFunc, nil)
+	if rerr != nil {
+		if winResult.ReleaseFunc != nil {
+			winResult.ReleaseFunc()
+		}
+		return nil
+	}
+	if selfSlot != nil && selfSlot.ReleaseFunc != nil {
+		selfSlot.ReleaseFunc()
+	}
+	return redirected
 }
 
 // GetCachedSessionAccountID retrieves the account ID bound to a sticky session.
