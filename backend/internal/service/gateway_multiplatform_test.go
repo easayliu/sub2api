@@ -3304,3 +3304,122 @@ func TestGatewayService_ResolveGatewayGroup_DetectsFallbackCycle(t *testing.T) {
 	require.Nil(t, gotID)
 	require.Contains(t, err.Error(), "fallback group cycle")
 }
+
+// TestGatewayService_SelectAccountForModelWithPlatform_LegacyPreservesExistingBinding
+// verifies the SETNX write in legacy fallback does not clobber an existing
+// sticky binding owned by the LoadAware main-messages path. Concretely:
+// the bound account (A) is passed in excludedIDs so the legacy sticky-hit
+// branch is skipped without deletion; the main loop picks a different
+// account (C) but SetSessionAccountIDIfAbsent must leave the original
+// binding (session-x -> A) intact.
+func TestGatewayService_SelectAccountForModelWithPlatform_LegacyPreservesExistingBinding(t *testing.T) {
+	ctx := context.Background()
+
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+
+	cache := &mockGatewayCacheForPlatform{
+		sessionBindings: map[string]int64{"session-x": 1},
+	}
+
+	svc := &GatewayService{
+		accountRepo: repo,
+		cache:       cache,
+		cfg:         testConfig(),
+	}
+
+	excluded := map[int64]struct{}{1: {}}
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-x", "claude-3-5-sonnet-20241022", excluded, PlatformAnthropic)
+	require.NoError(t, err)
+	require.NotNil(t, acc)
+	require.Equal(t, int64(2), acc.ID, "legacy loop should pick C since A is excluded")
+	require.Equal(t, int64(1), cache.sessionBindings["session-x"], "existing binding to A must be preserved by SETNX write")
+}
+
+// TestGatewayService_SelectAccountForModelWithPlatform_LegacyLRUPrefersUsedUnderStickyOverflow
+// verifies the LRU tiebreaker swap: when a session already has a binding,
+// the legacy loop prefers a warm (LastUsedAt != nil) account over a newly
+// enabled one (LastUsedAt == nil). Without this, a freshly added OAuth
+// account captures every sticky-overflow fallthrough and the client's
+// device_id silently migrates.
+func TestGatewayService_SelectAccountForModelWithPlatform_LegacyLRUPrefersUsedUnderStickyOverflow(t *testing.T) {
+	ctx := context.Background()
+	lastUsed := time.Now().Add(-1 * time.Hour)
+
+	// Account 1 (A) is bound but excluded so the sticky-hit branch is skipped
+	// without deleting the binding; stickyOverflow is captured at func entry
+	// and remains true for the LRU loop.
+	// Account 2 (C) is the newly enabled account (LastUsedAt == nil).
+	// Account 3 (D) is the warm account (LastUsedAt != nil) that should win
+	// the LRU tiebreak under stickyOverflow.
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true, LastUsedAt: &lastUsed},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
+			{ID: 3, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true, LastUsedAt: &lastUsed},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+
+	cache := &mockGatewayCacheForPlatform{
+		sessionBindings: map[string]int64{"session-x": 1},
+	}
+
+	svc := &GatewayService{
+		accountRepo: repo,
+		cache:       cache,
+		cfg:         testConfig(),
+	}
+
+	excluded := map[int64]struct{}{1: {}}
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-x", "claude-3-5-sonnet-20241022", excluded, PlatformAnthropic)
+	require.NoError(t, err)
+	require.NotNil(t, acc)
+	require.Equal(t, int64(3), acc.ID, "under stickyOverflow, warm (used) account D must beat newly enabled C")
+}
+
+// TestGatewayService_SelectAccountForModelWithPlatform_LegacyLRUPrefersNeverUsedWithoutSticky
+// confirms the original "prefer never-used" behavior is preserved when no
+// sticky binding exists (stickyOverflow == false). This is the symmetric
+// case to the stickyOverflow test above and guards against accidentally
+// inverting the first-bind bootstrap behavior.
+func TestGatewayService_SelectAccountForModelWithPlatform_LegacyLRUPrefersNeverUsedWithoutSticky(t *testing.T) {
+	ctx := context.Background()
+	lastUsed := time.Now().Add(-1 * time.Hour)
+
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			{ID: 2, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
+			{ID: 3, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true, LastUsedAt: &lastUsed},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+
+	cache := &mockGatewayCacheForPlatform{}
+
+	svc := &GatewayService{
+		accountRepo: repo,
+		cache:       cache,
+		cfg:         testConfig(),
+	}
+
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-fresh", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	require.NoError(t, err)
+	require.NotNil(t, acc)
+	require.Equal(t, int64(2), acc.ID, "with no sticky binding, LRU should still prefer never-used C")
+	require.Equal(t, int64(2), cache.sessionBindings["session-fresh"], "first-bind must write C into the cache")
+}

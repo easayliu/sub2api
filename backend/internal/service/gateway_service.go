@@ -1939,7 +1939,11 @@ func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates
 				continue
 			}
 			if sessionHash != "" && s.cache != nil {
-				_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, acc.ID, stickySessionTTL)
+				// SETNX semantics: do not overwrite an existing binding that a
+				// concurrent LoadAware request may have written for the same
+				// session. Legacy fallback should only establish a binding
+				// when none exists.
+				_, _, _ = s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, acc.ID, stickySessionTTL)
 			}
 			selection, err := s.newSelectionResult(ctx, acc, true, result.ReleaseFunc, nil)
 			if err != nil {
@@ -2909,6 +2913,18 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	preferOAuth := platform == PlatformGemini
 	routingAccountIDs := s.routingAccountIDsForRequest(ctx, groupID, requestedModel, platform)
 
+	// Capture whether a sticky binding exists BEFORE any fallthrough logic
+	// might delete it. Used below to prefer already-used accounts over
+	// newly-enabled ones (LastUsedAt==nil) so a fresh account cannot hijack
+	// the session's affinity when the bound account fails a gate.
+	var stickyAccountID int64
+	if sessionHash != "" && s.cache != nil {
+		if id, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash); err == nil {
+			stickyAccountID = id
+		}
+	}
+	stickyOverflow := stickyAccountID > 0
+
 	// require_privacy_set: 获取分组信息
 	var schedGroup *Group
 	if groupID != nil && s.groupRepo != nil {
@@ -2929,22 +2945,30 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		// 1) Sticky session only applies if the bound account is within the routing set.
 		if sessionHash != "" && s.cache != nil {
 			accountID, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-			if err == nil && accountID > 0 && containsInt64(routingAccountIDs, accountID) {
-				if _, excluded := excludedIDs[accountID]; !excluded {
-					account, err := s.getSchedulableAccount(ctx, accountID)
-					// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
-					if err == nil {
-						clearSticky := shouldClearStickySession(account, requestedModel)
-						if clearSticky {
-							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-						}
-						if !clearSticky && s.isAccountInGroup(account, groupID) && account.Platform == platform && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
-							if s.debugModelRoutingEnabled() {
-								logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
+			if err == nil && accountID > 0 {
+				if containsInt64(routingAccountIDs, accountID) {
+					if _, excluded := excludedIDs[accountID]; !excluded {
+						account, err := s.getSchedulableAccount(ctx, accountID)
+						// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
+						if err == nil {
+							clearSticky := shouldClearStickySession(account, requestedModel)
+							if clearSticky {
+								_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 							}
-							return account, nil
+							if !clearSticky && s.isAccountInGroup(account, groupID) && account.Platform == platform && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
+								if s.debugModelRoutingEnabled() {
+									logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
+								}
+								return account, nil
+							}
 						}
 					}
+				} else {
+					// Binding belongs to an account outside the current model's
+					// routing set — a model switch occurred within this session.
+					// Delete the stale binding so the SETNX write at the end of
+					// the routing loop can commit the new model's selection.
+					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 				}
 			}
 		}
@@ -3016,9 +3040,17 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 			} else if acc.Priority == selected.Priority {
 				switch {
 				case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
-					selected = acc
+					// Under sticky-overflow keep the warm (used) 'selected';
+					// otherwise original behavior: prefer never-used.
+					if !stickyOverflow {
+						selected = acc
+					}
 				case acc.LastUsedAt != nil && selected.LastUsedAt == nil:
-					// keep selected (never used is preferred)
+					// Under sticky-overflow prefer the warm (used) 'acc' over
+					// the never-used 'selected'. Otherwise keep 'selected'.
+					if stickyOverflow {
+						selected = acc
+					}
 				case acc.LastUsedAt == nil && selected.LastUsedAt == nil:
 					if preferOAuth && acc.Type != selected.Type && acc.Type == AccountTypeOAuth {
 						selected = acc
@@ -3033,7 +3065,11 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
-				if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
+				// SETNX semantics: preserve an existing sticky binding that a
+				// concurrent LoadAware main-messages request may have written
+				// for this session. Legacy selection should only claim the
+				// binding when none exists yet.
+				if _, _, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
 					logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
 				}
 			}
@@ -3130,9 +3166,17 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		} else if acc.Priority == selected.Priority {
 			switch {
 			case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
-				selected = acc
+				// Under sticky-overflow keep the warm (used) 'selected';
+				// otherwise original behavior: prefer never-used.
+				if !stickyOverflow {
+					selected = acc
+				}
 			case acc.LastUsedAt != nil && selected.LastUsedAt == nil:
-				// keep selected (never used is preferred)
+				// Under sticky-overflow prefer the warm (used) 'acc' over
+				// the never-used 'selected'. Otherwise keep 'selected'.
+				if stickyOverflow {
+					selected = acc
+				}
 			case acc.LastUsedAt == nil && selected.LastUsedAt == nil:
 				if preferOAuth && acc.Type != selected.Type && acc.Type == AccountTypeOAuth {
 					selected = acc
@@ -3154,8 +3198,11 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	}
 
 	// 4. 建立粘性绑定
+	// SETNX semantics: preserve an existing sticky binding that a concurrent
+	// LoadAware main-messages request may have written for this session.
+	// Legacy selection should only claim the binding when none exists yet.
 	if sessionHash != "" && s.cache != nil {
-		if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
+		if _, _, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
 			logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
 		}
 	}
@@ -3168,6 +3215,18 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, nativePlatform string) (*Account, error) {
 	preferOAuth := nativePlatform == PlatformGemini
 	routingAccountIDs := s.routingAccountIDsForRequest(ctx, groupID, requestedModel, nativePlatform)
+
+	// Capture whether a sticky binding exists BEFORE any fallthrough logic
+	// might delete it. Used below to prefer already-used accounts over
+	// newly-enabled ones (LastUsedAt==nil) so a fresh account cannot hijack
+	// the session's affinity when the bound account fails a gate.
+	var stickyAccountID int64
+	if sessionHash != "" && s.cache != nil {
+		if id, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash); err == nil {
+			stickyAccountID = id
+		}
+	}
+	stickyOverflow := stickyAccountID > 0
 
 	// require_privacy_set: 获取分组信息
 	var schedGroup *Group
@@ -3187,24 +3246,32 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		// 1) Sticky session only applies if the bound account is within the routing set.
 		if sessionHash != "" && s.cache != nil {
 			accountID, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-			if err == nil && accountID > 0 && containsInt64(routingAccountIDs, accountID) {
-				if _, excluded := excludedIDs[accountID]; !excluded {
-					account, err := s.getSchedulableAccount(ctx, accountID)
-					// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
-					if err == nil {
-						clearSticky := shouldClearStickySession(account, requestedModel)
-						if clearSticky {
-							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-						}
-						if !clearSticky && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
-							if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
-								if s.debugModelRoutingEnabled() {
-									logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
+			if err == nil && accountID > 0 {
+				if containsInt64(routingAccountIDs, accountID) {
+					if _, excluded := excludedIDs[accountID]; !excluded {
+						account, err := s.getSchedulableAccount(ctx, accountID)
+						// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
+						if err == nil {
+							clearSticky := shouldClearStickySession(account, requestedModel)
+							if clearSticky {
+								_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+							}
+							if !clearSticky && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
+								if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
+									if s.debugModelRoutingEnabled() {
+										logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
+									}
+									return account, nil
 								}
-								return account, nil
 							}
 						}
 					}
+				} else {
+					// Binding belongs to an account outside the current model's
+					// routing set — a model switch occurred within this session.
+					// Delete the stale binding so the SETNX write at the end of
+					// the routing loop can commit the new model's selection.
+					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 				}
 			}
 		}
@@ -3276,9 +3343,17 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 			} else if acc.Priority == selected.Priority {
 				switch {
 				case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
-					selected = acc
+					// Under sticky-overflow keep the warm (used) 'selected';
+					// otherwise original behavior: prefer never-used.
+					if !stickyOverflow {
+						selected = acc
+					}
 				case acc.LastUsedAt != nil && selected.LastUsedAt == nil:
-					// keep selected (never used is preferred)
+					// Under sticky-overflow prefer the warm (used) 'acc' over
+					// the never-used 'selected'. Otherwise keep 'selected'.
+					if stickyOverflow {
+						selected = acc
+					}
 				case acc.LastUsedAt == nil && selected.LastUsedAt == nil:
 					if preferOAuth && acc.Platform == PlatformGemini && selected.Platform == PlatformGemini && acc.Type != selected.Type && acc.Type == AccountTypeOAuth {
 						selected = acc
@@ -3293,7 +3368,11 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
-				if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
+				// SETNX semantics: preserve an existing sticky binding that a
+				// concurrent LoadAware main-messages request may have written
+				// for this session. Legacy selection should only claim the
+				// binding when none exists yet.
+				if _, _, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
 					logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
 				}
 			}
@@ -3391,9 +3470,17 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		} else if acc.Priority == selected.Priority {
 			switch {
 			case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
-				selected = acc
+				// Under sticky-overflow keep the warm (used) 'selected';
+				// otherwise original behavior: prefer never-used.
+				if !stickyOverflow {
+					selected = acc
+				}
 			case acc.LastUsedAt != nil && selected.LastUsedAt == nil:
-				// keep selected (never used is preferred)
+				// Under sticky-overflow prefer the warm (used) 'acc' over
+				// the never-used 'selected'. Otherwise keep 'selected'.
+				if stickyOverflow {
+					selected = acc
+				}
 			case acc.LastUsedAt == nil && selected.LastUsedAt == nil:
 				if preferOAuth && acc.Platform == PlatformGemini && selected.Platform == PlatformGemini && acc.Type != selected.Type && acc.Type == AccountTypeOAuth {
 					selected = acc
@@ -3415,8 +3502,11 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	}
 
 	// 4. 建立粘性绑定
+	// SETNX semantics: preserve an existing sticky binding that a concurrent
+	// LoadAware main-messages request may have written for this session.
+	// Legacy selection should only claim the binding when none exists yet.
 	if sessionHash != "" && s.cache != nil {
-		if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
+		if _, _, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
 			logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
 		}
 	}
