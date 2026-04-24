@@ -320,6 +320,17 @@ func (c *stubGatewayCache) SetSessionAccountID(ctx context.Context, groupID int6
 	return nil
 }
 
+func (c *stubGatewayCache) SetSessionAccountIDIfAbsent(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) (int64, bool, error) {
+	if c.sessionBindings == nil {
+		c.sessionBindings = make(map[string]int64)
+	}
+	if existing, ok := c.sessionBindings[sessionHash]; ok {
+		return existing, false, nil
+	}
+	c.sessionBindings[sessionHash] = accountID
+	return accountID, true, nil
+}
+
 func (c *stubGatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error {
 	return nil
 }

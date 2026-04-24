@@ -35,6 +35,24 @@ func (c *gatewayCache) SetSessionAccountID(ctx context.Context, groupID int64, s
 	return c.rdb.Set(ctx, key, accountID, ttl).Err()
 }
 
+// SetSessionAccountIDIfAbsent binds only when no prior binding exists.
+// On SETNX failure, reads the winning value so the caller can converge.
+func (c *gatewayCache) SetSessionAccountIDIfAbsent(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) (int64, bool, error) {
+	key := buildSessionKey(groupID, sessionHash)
+	ok, err := c.rdb.SetNX(ctx, key, accountID, ttl).Result()
+	if err != nil {
+		return 0, false, err
+	}
+	if ok {
+		return accountID, true, nil
+	}
+	existing, err := c.rdb.Get(ctx, key).Int64()
+	if err != nil {
+		return 0, false, err
+	}
+	return existing, false, nil
+}
+
 func (c *gatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error {
 	key := buildSessionKey(groupID, sessionHash)
 	return c.rdb.Expire(ctx, key, ttl).Err()

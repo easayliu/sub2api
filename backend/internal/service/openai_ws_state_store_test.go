@@ -181,6 +181,14 @@ func (c *openAIWSStateStoreTimeoutProbeCache) SetSessionAccountID(ctx context.Co
 	return errors.New("set failed")
 }
 
+func (c *openAIWSStateStoreTimeoutProbeCache) SetSessionAccountIDIfAbsent(ctx context.Context, _ int64, _ string, accountID int64, _ time.Duration) (int64, bool, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		c.setHasDeadline = true
+		c.setDeadlineDelta = time.Until(deadline)
+	}
+	return accountID, true, nil
+}
+
 func (c *openAIWSStateStoreTimeoutProbeCache) RefreshSessionTTL(context.Context, int64, string, time.Duration) error {
 	return nil
 }

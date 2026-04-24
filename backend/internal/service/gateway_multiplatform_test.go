@@ -219,6 +219,17 @@ func (m *mockGatewayCacheForPlatform) SetSessionAccountID(ctx context.Context, g
 	return nil
 }
 
+func (m *mockGatewayCacheForPlatform) SetSessionAccountIDIfAbsent(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) (int64, bool, error) {
+	if m.sessionBindings == nil {
+		m.sessionBindings = make(map[string]int64)
+	}
+	if existing, ok := m.sessionBindings[sessionHash]; ok {
+		return existing, false, nil
+	}
+	m.sessionBindings[sessionHash] = accountID
+	return accountID, true, nil
+}
+
 func (m *mockGatewayCacheForPlatform) RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error {
 	return nil
 }

@@ -136,6 +136,10 @@ func (s *stickyGatewayCacheHotpathStub) SetSessionAccountID(ctx context.Context,
 	return nil
 }
 
+func (s *stickyGatewayCacheHotpathStub) SetSessionAccountIDIfAbsent(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) (int64, bool, error) {
+	return accountID, true, nil
+}
+
 func (s *stickyGatewayCacheHotpathStub) RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error {
 	return nil
 }

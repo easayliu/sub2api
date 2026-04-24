@@ -272,6 +272,17 @@ func (m *mockGatewayCacheForGemini) SetSessionAccountID(ctx context.Context, gro
 	return nil
 }
 
+func (m *mockGatewayCacheForGemini) SetSessionAccountIDIfAbsent(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) (int64, bool, error) {
+	if m.sessionBindings == nil {
+		m.sessionBindings = make(map[string]int64)
+	}
+	if existing, ok := m.sessionBindings[sessionHash]; ok {
+		return existing, false, nil
+	}
+	m.sessionBindings[sessionHash] = accountID
+	return accountID, true, nil
+}
+
 func (m *mockGatewayCacheForGemini) RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error {
 	return nil
 }

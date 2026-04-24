@@ -390,6 +390,11 @@ type GatewayCache interface {
 	// SetSessionAccountID 设置粘性会话与账号的绑定关系
 	// Set the binding between sticky session and account
 	SetSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) error
+	// SetSessionAccountIDIfAbsent attempts an atomic SETNX binding to avoid
+	// concurrent first-bind races. Returns (boundAccountID, won, err):
+	//   - won=true: the caller's accountID was written successfully
+	//   - won=false: the key already existed; boundAccountID is the winning value
+	SetSessionAccountIDIfAbsent(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) (int64, bool, error)
 	// RefreshSessionTTL 刷新粘性会话的过期时间
 	// Refresh the expiration time of a sticky session
 	RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error
@@ -732,6 +737,65 @@ func (s *GatewayService) BindStickySession(ctx context.Context, groupID *int64, 
 		return nil
 	}
 	return s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, accountID, stickySessionTTL)
+}
+
+// resolveStickyRaceWinner performs SETNX on the sticky binding and converges
+// to a concurrent winner if another request bound the session first.
+//
+// Behavior:
+//   - No race (won, or winner == self): returns nil, caller keeps its slot.
+//   - Race lost with winner reachable and slot acquirable: releases the
+//     loser's slot, returns a selection pointing at the winner.
+//   - Race lost but winner unreachable (not in snapshot) or full: overwrites
+//     the binding with self so future requests converge (last-writer-wins
+//     fallback), returns nil.
+//
+// Returns nil when the caller should keep its original selection.
+func (s *GatewayService) resolveStickyRaceWinner(
+	ctx context.Context,
+	groupID *int64,
+	sessionHash string,
+	selfAccount *Account,
+	selfSlot *AcquireResult,
+	accountByID map[int64]*Account,
+) *AccountSelectionResult {
+	if sessionHash == "" || s.cache == nil || selfAccount == nil {
+		return nil
+	}
+	winnerID, won, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selfAccount.ID, stickySessionTTL)
+	if err != nil || won || winnerID <= 0 || winnerID == selfAccount.ID {
+		return nil
+	}
+	if winnerAccount, ok := accountByID[winnerID]; ok && winnerAccount != nil {
+		winResult, e := s.tryAcquireAccountSlot(ctx, winnerID, winnerAccount.Concurrency)
+		if e == nil && winResult != nil && winResult.Acquired {
+			// Refresh winner's session registration (idempotent). If it fails
+			// (winner hit session limit after its own registration expired),
+			// release winner slot and fall through to self-overwrite.
+			if !s.checkAndRegisterSession(ctx, winnerAccount, sessionHash) {
+				if winResult.ReleaseFunc != nil {
+					winResult.ReleaseFunc()
+				}
+			} else {
+				// Build redirect BEFORE releasing loser's slot: if hydration fails
+				// we must leave the loser slot intact so the caller can keep using it.
+				redirected, rerr := s.newSelectionResult(ctx, winnerAccount, true, winResult.ReleaseFunc, nil)
+				if rerr == nil {
+					if selfSlot != nil && selfSlot.ReleaseFunc != nil {
+						selfSlot.ReleaseFunc()
+					}
+					return redirected
+				}
+				if winResult.ReleaseFunc != nil {
+					winResult.ReleaseFunc()
+				}
+			}
+		}
+	}
+	// Winner unusable: overwrite binding with self so future requests converge.
+	// Loser still holds its slot, caller continues with its original selection.
+	_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selfAccount.ID, stickySessionTTL)
+	return nil
 }
 
 // GetCachedSessionAccountID retrieves the account ID bound to a sticky session.
@@ -1578,8 +1642,12 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 							continue
 						}
-						if sessionHash != "" && s.cache != nil {
-							_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, item.account.ID, stickySessionTTL)
+						winner := s.resolveStickyRaceWinner(ctx, groupID, sessionHash, item.account, result, accountByID)
+						if winner != nil {
+							if s.debugModelRoutingEnabled() {
+								logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] routed select race-redirected: group_id=%v model=%s session=%s loser=%d winner=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID, winner.Account.ID)
+							}
+							return winner, nil
 						}
 						if s.debugModelRoutingEnabled() {
 							logger.LegacyPrintf("service.gateway", "[debug] [ModelRoutingDebug] routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
@@ -1800,8 +1868,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				if !s.checkAndRegisterSession(ctx, selected.account, sessionHash) {
 					result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 				} else {
-					if sessionHash != "" && s.cache != nil {
-						_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.account.ID, stickySessionTTL)
+					winner := s.resolveStickyRaceWinner(ctx, groupID, sessionHash, selected.account, result, accountByID)
+					if winner != nil {
+						return winner, nil
 					}
 					return s.newSelectionResult(ctx, selected.account, true, result.ReleaseFunc, nil)
 				}

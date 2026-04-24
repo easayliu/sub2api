@@ -94,6 +94,9 @@ func (c StubGatewayCache) GetSessionAccountID(_ context.Context, _ int64, _ stri
 func (c StubGatewayCache) SetSessionAccountID(_ context.Context, _ int64, _ string, _ int64, _ time.Duration) error {
 	return nil
 }
+func (c StubGatewayCache) SetSessionAccountIDIfAbsent(_ context.Context, _ int64, _ string, accountID int64, _ time.Duration) (int64, bool, error) {
+	return accountID, true, nil
+}
 func (c StubGatewayCache) RefreshSessionTTL(_ context.Context, _ int64, _ string, _ time.Duration) error {
 	return nil
 }
