@@ -14,17 +14,13 @@
           <AccountTableActions
             :loading="loading"
             @refresh="handleManualRefresh"
-            @sync="showSync = true"
             @create="showCreate = true"
           >
             <template #after>
               <!-- Auto Refresh Dropdown -->
               <div class="relative" ref="autoRefreshDropdownRef">
                 <button
-                  @click="
-                    showAutoRefreshDropdown = !showAutoRefreshDropdown;
-                    showColumnDropdown = false
-                  "
+                  @click="toggleDropdown('autoRefresh')"
                   class="btn btn-secondary px-2 md:px-3"
                   :title="t('admin.accounts.autoRefresh')"
                 >
@@ -63,33 +59,10 @@
                 </div>
               </div>
 
-              <!-- Error Passthrough Rules -->
-              <button
-                @click="showErrorPassthrough = true"
-                class="btn btn-secondary"
-                :title="t('admin.errorPassthrough.title')"
-              >
-                <Icon name="shield" size="md" class="mr-1.5" />
-                <span class="hidden md:inline">{{ t('admin.errorPassthrough.title') }}</span>
-              </button>
-
-              <!-- TLS Fingerprint Profiles -->
-              <button
-                @click="showTLSFingerprintProfiles = true"
-                class="btn btn-secondary"
-                :title="t('admin.tlsFingerprintProfiles.title')"
-              >
-                <Icon name="lock" size="md" class="mr-1.5" />
-                <span class="hidden md:inline">{{ t('admin.tlsFingerprintProfiles.title') }}</span>
-              </button>
-
               <!-- Column Settings Dropdown -->
               <div class="relative" ref="columnDropdownRef">
                 <button
-                  @click="
-                    showColumnDropdown = !showColumnDropdown;
-                    showAutoRefreshDropdown = false
-                  "
+                  @click="toggleDropdown('column')"
                   class="btn btn-secondary px-2 md:px-3"
                   :title="t('admin.users.columnSettings')"
                 >
@@ -116,24 +89,83 @@
                   </div>
                 </div>
               </div>
-            </template>
-            <template #beforeCreate>
-              <button @click="showImportData = true" class="btn btn-secondary">
-                {{ t('admin.accounts.dataImport') }}
-              </button>
-              <button @click="openExportDataDialog" class="btn btn-secondary">
-                {{ selIds.length ? t('admin.accounts.dataExportSelected') : t('admin.accounts.dataExport') }}
-              </button>
+
+              <!-- Overflow Menu (industry-standard kebab) -->
+              <div class="relative" ref="moreDropdownRef">
+                <button
+                  @click="toggleDropdown('more')"
+                  class="btn btn-secondary px-2 md:px-3"
+                  :title="t('common.more')"
+                  :aria-haspopup="true"
+                  :aria-expanded="showMoreDropdown"
+                >
+                  <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM12.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM18.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />
+                  </svg>
+                </button>
+                <div
+                  v-if="showMoreDropdown"
+                  class="absolute right-0 z-50 mt-2 w-56 origin-top-right rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800"
+                  role="menu"
+                >
+                  <button
+                    @click="runFromMore(() => { showSync = true })"
+                    class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                    role="menuitem"
+                  >
+                    <Icon name="refresh" size="sm" class="text-gray-500 dark:text-gray-400" />
+                    <span>{{ t('admin.accounts.syncFromCrs') }}</span>
+                  </button>
+                  <div class="my-1 border-t border-gray-100 dark:border-gray-700"></div>
+                  <button
+                    @click="runFromMore(() => { showImportData = true })"
+                    class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                    role="menuitem"
+                  >
+                    <svg class="h-4 w-4 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                    </svg>
+                    <span>{{ t('admin.accounts.dataImport') }}</span>
+                  </button>
+                  <button
+                    @click="runFromMore(openExportDataDialog)"
+                    class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                    role="menuitem"
+                  >
+                    <svg class="h-4 w-4 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                    </svg>
+                    <span>{{ selIds.length ? t('admin.accounts.dataExportSelected') : t('admin.accounts.dataExport') }}</span>
+                  </button>
+                  <div class="my-1 border-t border-gray-100 dark:border-gray-700"></div>
+                  <button
+                    @click="runFromMore(() => { showErrorPassthrough = true })"
+                    class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                    role="menuitem"
+                  >
+                    <Icon name="shield" size="sm" class="text-gray-500 dark:text-gray-400" />
+                    <span>{{ t('admin.errorPassthrough.title') }}</span>
+                  </button>
+                  <button
+                    @click="runFromMore(() => { showTLSFingerprintProfiles = true })"
+                    class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                    role="menuitem"
+                  >
+                    <Icon name="lock" size="sm" class="text-gray-500 dark:text-gray-400" />
+                    <span>{{ t('admin.tlsFingerprintProfiles.title') }}</span>
+                  </button>
+                </div>
+              </div>
             </template>
           </AccountTableActions>
         </div>
         <div
           v-if="hasPendingListSync"
-          class="mt-2 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200"
+          class="mt-2 flex flex-col gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
         >
           <span>{{ t('admin.accounts.listPendingSyncHint') }}</span>
           <button
-            class="btn btn-secondary px-2 py-1 text-xs"
+            class="btn btn-secondary self-start px-2 py-1 text-xs sm:self-auto"
             @click="syncPendingListChanges"
           >
             {{ t('admin.accounts.listPendingSyncAction') }}
@@ -438,6 +470,23 @@ const sortState = reactive<AccountSortState>(loadInitialAccountSortState())
 // Auto refresh settings
 const showAutoRefreshDropdown = ref(false)
 const autoRefreshDropdownRef = ref<HTMLElement | null>(null)
+
+// Overflow ("more") dropdown
+const showMoreDropdown = ref(false)
+const moreDropdownRef = ref<HTMLElement | null>(null)
+
+type ActionDropdown = 'autoRefresh' | 'column' | 'more'
+
+const toggleDropdown = (name: ActionDropdown) => {
+  showAutoRefreshDropdown.value = name === 'autoRefresh' ? !showAutoRefreshDropdown.value : false
+  showColumnDropdown.value = name === 'column' ? !showColumnDropdown.value : false
+  showMoreDropdown.value = name === 'more' ? !showMoreDropdown.value : false
+}
+
+const runFromMore = (action: () => void) => {
+  showMoreDropdown.value = false
+  action()
+}
 const AUTO_REFRESH_STORAGE_KEY = 'account-auto-refresh'
 const autoRefreshIntervals = [5, 10, 15, 30] as const
 const autoRefreshEnabled = ref(false)
@@ -1413,6 +1462,16 @@ const handleClickOutside = (event: MouseEvent) => {
   if (autoRefreshDropdownRef.value && !autoRefreshDropdownRef.value.contains(target)) {
     showAutoRefreshDropdown.value = false
   }
+  if (moreDropdownRef.value && !moreDropdownRef.value.contains(target)) {
+    showMoreDropdown.value = false
+  }
+}
+
+const handleActionMenuKeydown = (event: KeyboardEvent) => {
+  if (event.key !== 'Escape') return
+  showColumnDropdown.value = false
+  showAutoRefreshDropdown.value = false
+  showMoreDropdown.value = false
 }
 
 onMounted(async () => {
@@ -1426,6 +1485,7 @@ onMounted(async () => {
   }
   window.addEventListener('scroll', handleScroll, true)
   document.addEventListener('click', handleClickOutside)
+  document.addEventListener('keydown', handleActionMenuKeydown)
 
   if (autoRefreshEnabled.value) {
     autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
@@ -1438,5 +1498,6 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('scroll', handleScroll, true)
   document.removeEventListener('click', handleClickOutside)
+  document.removeEventListener('keydown', handleActionMenuKeydown)
 })
 </script>

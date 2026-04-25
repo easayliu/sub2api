@@ -4,23 +4,18 @@ import App from './App.vue'
 import router from './router'
 import i18n, { initI18n } from './i18n'
 import { useAppStore } from '@/stores/app'
+import { useThemeStore } from '@/stores/theme'
 import './style.css'
 
-function initThemeClass() {
-  const savedTheme = localStorage.getItem('theme')
-  const shouldUseDark =
-    savedTheme === 'dark' ||
-    (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)
-  document.documentElement.classList.toggle('dark', shouldUseDark)
-}
-
 async function bootstrap() {
-  // Apply theme class globally before app mount to keep all routes consistent.
-  initThemeClass()
-
   const app = createApp(App)
   const pinia = createPinia()
   app.use(pinia)
+
+  // Apply theme class globally before app mount to prevent FOUC.
+  // The theme store also wires a matchMedia listener for live "system" tracking.
+  const themeStore = useThemeStore()
+  themeStore.init()
 
   // Initialize settings from injected config BEFORE mounting (prevents flash)
   // This must happen after pinia is installed but before router and i18n

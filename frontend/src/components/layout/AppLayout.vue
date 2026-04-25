@@ -15,7 +15,7 @@
       <AppHeader />
 
       <!-- Main Content -->
-      <main class="p-4 md:p-6 lg:p-8">
+      <main class="safe-x p-3 sm:p-4 md:p-6 lg:p-8">
         <slot />
       </main>
     </div>

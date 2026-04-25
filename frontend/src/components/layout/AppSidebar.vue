@@ -141,18 +141,22 @@
 
     <!-- Bottom Section -->
     <div class="mt-auto border-t border-gray-100 p-3 dark:border-dark-800">
-      <!-- Theme Toggle -->
+      <!-- Theme Toggle (cycles light → dark → system) -->
       <button
-        @click="toggleTheme"
+        @click="cycleTheme"
         class="sidebar-link mb-2 w-full"
         :class="{ 'sidebar-link-collapsed': sidebarCollapsed }"
-        :title="sidebarCollapsed ? (isDark ? t('nav.lightMode') : t('nav.darkMode')) : undefined"
+        :title="themeButtonTitle"
+        :aria-label="themeButtonTitle"
       >
-        <SunIcon v-if="isDark" class="h-5 w-5 flex-shrink-0 text-amber-500" />
-        <MoonIcon v-else class="h-5 w-5 flex-shrink-0" />
-        <span class="sidebar-label" :class="{ 'sidebar-label-collapsed': sidebarCollapsed }" :aria-hidden="sidebarCollapsed ? 'true' : 'false'">{{
-          isDark ? t('nav.lightMode') : t('nav.darkMode')
-        }}</span>
+        <SunIcon v-if="themeMode === 'light'" class="h-5 w-5 flex-shrink-0 text-amber-500" />
+        <MoonIcon v-else-if="themeMode === 'dark'" class="h-5 w-5 flex-shrink-0" />
+        <SystemIcon v-else class="h-5 w-5 flex-shrink-0" />
+        <span
+          class="sidebar-label"
+          :class="{ 'sidebar-label-collapsed': sidebarCollapsed }"
+          :aria-hidden="sidebarCollapsed ? 'true' : 'false'"
+        >{{ themeLabel }}</span>
       </button>
 
       <!-- Collapse Button -->
@@ -183,7 +187,13 @@
 import { computed, h, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { useAdminSettingsStore, useAppStore, useAuthStore, useOnboardingStore } from '@/stores'
+import {
+  useAdminSettingsStore,
+  useAppStore,
+  useAuthStore,
+  useOnboardingStore,
+  useThemeStore,
+} from '@/stores'
 import VersionBadge from '@/components/common/VersionBadge.vue'
 import { sanitizeSvg } from '@/utils/sanitize'
 
@@ -203,11 +213,18 @@ const appStore = useAppStore()
 const authStore = useAuthStore()
 const onboardingStore = useOnboardingStore()
 const adminSettingsStore = useAdminSettingsStore()
+const themeStore = useThemeStore()
 
 const sidebarCollapsed = computed(() => appStore.sidebarCollapsed)
 const mobileOpen = computed(() => appStore.mobileOpen)
 const isAdmin = computed(() => authStore.isAdmin)
-const isDark = ref(document.documentElement.classList.contains('dark'))
+const themeMode = computed(() => themeStore.mode)
+const themeLabel = computed(() => {
+  if (themeMode.value === 'light') return t('nav.lightMode')
+  if (themeMode.value === 'dark') return t('nav.darkMode')
+  return t('nav.systemMode')
+})
+const themeButtonTitle = computed(() => t('nav.themeCycleHint', { current: themeLabel.value }))
 
 // Track which parent nav groups are expanded
 const expandedGroups = ref<Set<string>>(new Set())
@@ -489,6 +506,21 @@ const MoonIcon = {
     )
 }
 
+const SystemIcon = {
+  render: () =>
+    h(
+      'svg',
+      { fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', 'stroke-width': '1.5' },
+      [
+        h('path', {
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+          d: 'M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25'
+        })
+      ]
+    )
+}
+
 const ChevronDoubleLeftIcon = {
   render: () =>
     h(
@@ -713,10 +745,8 @@ function toggleSidebar() {
   appStore.toggleSidebar()
 }
 
-function toggleTheme() {
-  isDark.value = !isDark.value
-  document.documentElement.classList.toggle('dark', isDark.value)
-  localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
+function cycleTheme() {
+  themeStore.cycle()
 }
 
 function closeMobile() {
@@ -762,16 +792,6 @@ function toggleGroup(item: NavItem) {
   } else {
     expandedGroups.value.add(item.path)
   }
-}
-
-// Initialize theme
-const savedTheme = localStorage.getItem('theme')
-if (
-  savedTheme === 'dark' ||
-  (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)
-) {
-  isDark.value = true
-  document.documentElement.classList.add('dark')
 }
 
 // Fetch admin settings (for feature-gated nav items like Ops).

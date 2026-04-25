@@ -348,6 +348,8 @@ export default {
     myAccount: 'My Account',
     lightMode: 'Light Mode',
     darkMode: 'Dark Mode',
+    systemMode: 'System',
+    themeCycleHint: 'Theme: {current} (click to switch)',
     collapse: 'Collapse',
     expand: 'Expand',
     logout: 'Logout',
