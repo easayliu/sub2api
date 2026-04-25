@@ -37,7 +37,30 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
+
+// logStickyMutation records sticky binding mutations at INFO so the full
+// session lifecycle can be reconstructed by grepping a short session hash.
+// Mutation volume per real session is low enough that INFO is appropriate;
+// read operations are NOT logged here to keep the channel focused on
+// state-changing events that could cause device_id drift.
+//
+// op:     "setnx" | "set" | "delete"
+// caller: short function name (e.g. "L1.5", "routing_legacy", "bind_sticky_session")
+// reason: why the mutation happened (e.g. "gate_fail", "model_switch", "shouldClear")
+func logStickyMutation(op, caller, reason string, groupID *int64, sessionHash string, accountID int64, extra ...zap.Field) {
+	fields := []zap.Field{
+		zap.String("op", op),
+		zap.String("caller", caller),
+		zap.String("reason", reason),
+		zap.Int64("group_id", derefGroupID(groupID)),
+		zap.String("session", shortSessionHash(sessionHash)),
+		zap.Int64("account_id", accountID),
+	}
+	fields = append(fields, extra...)
+	logger.L().Info("sticky.mutate", fields...)
+}
 
 const (
 	claudeAPIURL            = "https://api.anthropic.com/v1/messages?beta=true"
@@ -736,6 +759,7 @@ func (s *GatewayService) BindStickySession(ctx context.Context, groupID *int64, 
 	if sessionHash == "" || accountID <= 0 || s.cache == nil {
 		return nil
 	}
+	logStickyMutation("set", "bind_sticky_session", "handler_explicit_bind", groupID, sessionHash, accountID)
 	return s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, accountID, stickySessionTTL)
 }
 
@@ -765,7 +789,18 @@ func (s *GatewayService) resolveStickyRaceWinner(
 	if sessionHash == "" || s.cache == nil || selfAccount == nil {
 		return nil
 	}
+	logStickyMutation("setnx", "resolve_race_winner", "post_selection_bind", groupID, sessionHash, selfAccount.ID)
 	winnerID, won, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selfAccount.ID, stickySessionTTL)
+	if err == nil && !won && winnerID > 0 && winnerID != selfAccount.ID {
+		logger.L().Info("sticky.mutate",
+			zap.String("op", "setnx.lost_race"),
+			zap.String("caller", "resolve_race_winner"),
+			zap.Int64("group_id", derefGroupID(groupID)),
+			zap.String("session", shortSessionHash(sessionHash)),
+			zap.Int64("account_id", selfAccount.ID),
+			zap.Int64("winner", winnerID),
+		)
+	}
 	if err != nil || won || winnerID <= 0 || winnerID == selfAccount.ID {
 		return nil
 	}
@@ -1333,6 +1368,19 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 	}
 
+	// Request entry trace: snapshot of binding read at SelectAccountWithLoadAwareness
+	// entry. Pairs with sticky.mutate records (same session) to reconstruct
+	// "what was bound on arrival" vs "what got mutated" per request.
+	if sessionHash != "" {
+		logger.L().Info("sticky.trace",
+			zap.String("event", "select_entry"),
+			zap.Int64("group_id", derefGroupID(groupID)),
+			zap.String("session", shortSessionHash(sessionHash)),
+			zap.Int64("sticky_account", stickyAccountID),
+			zap.String("model", requestedModel),
+		)
+	}
+
 	if s.debugModelRoutingEnabled() && requestedModel != "" {
 		groupPlatform := ""
 		if group != nil {
@@ -1579,6 +1627,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								stickyCacheMissReason, stickyAccountID, shortSessionHash(sessionHash), currentRPM, baseRPM)
 						}
 					} else {
+						logStickyMutation("delete", "routing_loadaware_L1.5", "sticky_account_not_in_snapshot", groupID, sessionHash, stickyAccountID)
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						logger.LegacyPrintf("service.gateway", "[debug] [StickyCacheMiss] reason=account_cleared account_id=%d session=%s current_rpm=0 base_rpm=0",
 							stickyAccountID, shortSessionHash(sessionHash))
@@ -1708,6 +1757,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				// Check if the account needs sticky session cleanup
 				clearSticky := shouldClearStickySession(account, requestedModel)
 				if clearSticky {
+					logStickyMutation("delete", "loadaware_L1.5", "shouldClearStickySession", groupID, sessionHash, accountID)
 					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 				}
 				g1 := s.isAccountInGroup(account, groupID)
@@ -1726,6 +1776,15 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				// can write a fresh one. Without this, every subsequent
 				// request hits the same stale binding and drifts.
 				if !clearSticky && (!g1 || !g2 || !g3 || !g4 || !g5 || !g6 || !g7) {
+					logStickyMutation("delete", "loadaware_L1.5", "gate_fail", groupID, sessionHash, accountID,
+						zap.Bool("g1_inGroup", g1),
+						zap.Bool("g2_platform", g2),
+						zap.Bool("g3_modelSupport", g3),
+						zap.Bool("g4_modelSel", g4),
+						zap.Bool("g5_quota", g5),
+						zap.Bool("g6_windowCost", g6),
+						zap.Bool("g7_rpm", g7),
+					)
 					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					if s.debugModelRoutingEnabled() {
 						logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: gate_failed, cleared stale binding",
@@ -1943,6 +2002,7 @@ func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates
 				// concurrent LoadAware request may have written for the same
 				// session. Legacy fallback should only establish a binding
 				// when none exists.
+				logStickyMutation("setnx", "try_acquire_legacy_order", "legacy_batch_fallback", groupID, sessionHash, acc.ID)
 				_, _, _ = s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, acc.ID, stickySessionTTL)
 			}
 			selection, err := s.newSelectionResult(ctx, acc, true, result.ReleaseFunc, nil)
@@ -2924,6 +2984,15 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		}
 	}
 	stickyOverflow := stickyAccountID > 0
+	if sessionHash != "" {
+		logger.L().Info("sticky.trace",
+			zap.String("event", "legacy_entry"),
+			zap.Int64("group_id", derefGroupID(groupID)),
+			zap.String("session", shortSessionHash(sessionHash)),
+			zap.Int64("sticky_account", stickyAccountID),
+			zap.String("model", requestedModel),
+		)
+	}
 
 	// require_privacy_set: 获取分组信息
 	var schedGroup *Group
@@ -2953,6 +3022,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 						if err == nil {
 							clearSticky := shouldClearStickySession(account, requestedModel)
 							if clearSticky {
+								logStickyMutation("delete", "legacy_routing_L1", "shouldClearStickySession", groupID, sessionHash, accountID)
 								_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 							}
 							if !clearSticky && s.isAccountInGroup(account, groupID) && account.Platform == platform && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
@@ -2968,6 +3038,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 					// routing set — a model switch occurred within this session.
 					// Delete the stale binding so the SETNX write at the end of
 					// the routing loop can commit the new model's selection.
+					logStickyMutation("delete", "legacy_routing_L1", "model_switch_out_of_routing_set", groupID, sessionHash, accountID)
 					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 				}
 			}
@@ -3069,6 +3140,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 				// concurrent LoadAware main-messages request may have written
 				// for this session. Legacy selection should only claim the
 				// binding when none exists yet.
+				logStickyMutation("setnx", "legacy_routing_select", "routing_loop_bind", groupID, sessionHash, selected.ID)
 				if _, _, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
 					logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
 				}
@@ -3091,6 +3163,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 				if err == nil {
 					clearSticky := shouldClearStickySession(account, requestedModel)
 					if clearSticky {
+						logStickyMutation("delete", "legacy_nonrouting_L1", "shouldClearStickySession", groupID, sessionHash, accountID)
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
 					if !clearSticky && s.isAccountInGroup(account, groupID) && account.Platform == platform && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
@@ -3202,6 +3275,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	// LoadAware main-messages request may have written for this session.
 	// Legacy selection should only claim the binding when none exists yet.
 	if sessionHash != "" && s.cache != nil {
+		logStickyMutation("setnx", "legacy_nonrouting_bind", "main_selection_bind", groupID, sessionHash, selected.ID)
 		if _, _, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
 			logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
 		}
@@ -3227,6 +3301,15 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		}
 	}
 	stickyOverflow := stickyAccountID > 0
+	if sessionHash != "" {
+		logger.L().Info("sticky.trace",
+			zap.String("event", "legacy_entry"),
+			zap.Int64("group_id", derefGroupID(groupID)),
+			zap.String("session", shortSessionHash(sessionHash)),
+			zap.Int64("sticky_account", stickyAccountID),
+			zap.String("model", requestedModel),
+		)
+	}
 
 	// require_privacy_set: 获取分组信息
 	var schedGroup *Group
@@ -3254,6 +3337,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 						if err == nil {
 							clearSticky := shouldClearStickySession(account, requestedModel)
 							if clearSticky {
+								logStickyMutation("delete", "legacy_mixed_routing_L1", "shouldClearStickySession", groupID, sessionHash, accountID)
 								_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 							}
 							if !clearSticky && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
@@ -3271,6 +3355,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 					// routing set — a model switch occurred within this session.
 					// Delete the stale binding so the SETNX write at the end of
 					// the routing loop can commit the new model's selection.
+					logStickyMutation("delete", "legacy_mixed_routing_L1", "model_switch_out_of_routing_set", groupID, sessionHash, accountID)
 					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 				}
 			}
@@ -3372,6 +3457,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 				// concurrent LoadAware main-messages request may have written
 				// for this session. Legacy selection should only claim the
 				// binding when none exists yet.
+				logStickyMutation("setnx", "legacy_mixed_routing_select", "routing_loop_bind", groupID, sessionHash, selected.ID)
 				if _, _, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
 					logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
 				}
@@ -3394,6 +3480,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 				if err == nil {
 					clearSticky := shouldClearStickySession(account, requestedModel)
 					if clearSticky {
+						logStickyMutation("delete", "legacy_mixed_nonrouting_L1", "shouldClearStickySession", groupID, sessionHash, accountID)
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
 					if !clearSticky && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
@@ -3506,6 +3593,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	// LoadAware main-messages request may have written for this session.
 	// Legacy selection should only claim the binding when none exists yet.
 	if sessionHash != "" && s.cache != nil {
+		logStickyMutation("setnx", "legacy_mixed_nonrouting_bind", "main_selection_bind", groupID, sessionHash, selected.ID)
 		if _, _, err := s.cache.SetSessionAccountIDIfAbsent(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
 			logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
 		}
