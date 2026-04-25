@@ -46,8 +46,8 @@ func TestSchedulerCacheSnapshotUsesSlimMetadataButKeepsFullAccount(t *testing.T)
 			"mixed_scheduling":             true,
 			"window_cost_limit":            12.5,
 			"window_cost_sticky_reserve":   8.0,
-			"max_sessions":                 4,
-			"session_idle_timeout_minutes": 11,
+			"max_devices":                 4,
+			"device_idle_timeout_minutes": 11,
 			"unused_large_field":           strings.Repeat("y", 4096),
 		},
 		RateLimitResetAt:       &limitReset,
@@ -76,8 +76,8 @@ func TestSchedulerCacheSnapshotUsesSlimMetadataButKeepsFullAccount(t *testing.T)
 	require.Equal(t, true, got.Extra["mixed_scheduling"])
 	require.Equal(t, 12.5, got.GetWindowCostLimit())
 	require.Equal(t, 8.0, got.GetWindowCostStickyReserve())
-	require.Equal(t, 4, got.GetMaxSessions())
-	require.Equal(t, 11, got.GetSessionIdleTimeoutMinutes())
+	require.Equal(t, 4, got.GetMaxDevices())
+	require.Equal(t, 11, got.GetDeviceIdleTimeoutMinutes())
 	require.Nil(t, got.Extra["unused_large_field"])
 
 	full, err := cache.GetAccount(ctx, account.ID)

@@ -817,7 +817,7 @@ func (s *GatewayService) resolveStickyRaceWinner(
 	if e != nil || winResult == nil || !winResult.Acquired {
 		return nil
 	}
-	if !s.checkAndRegisterSession(ctx, winnerAccount, sessionHash) {
+	if !s.checkAndRegisterDevice(ctx, winnerAccount, sessionHash) {
 		if winResult.ReleaseFunc != nil {
 			winResult.ReleaseFunc()
 		}
@@ -1460,7 +1460,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
 			if err == nil && result.Acquired {
 				// 获取槽位后检查会话限制（使用 sessionHash 作为会话标识符）
-				if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+				if !s.checkAndRegisterDevice(ctx, account, sessionHash) {
 					result.ReleaseFunc()                   // 释放槽位
 					localExcluded[account.ID] = struct{}{} // 排除此账号
 					continue                               // 重新选择
@@ -1469,7 +1469,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 
 			// 对于等待计划的情况，也需要先检查会话限制
-			if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+			if !s.checkAndRegisterDevice(ctx, account, sessionHash) {
 				localExcluded[account.ID] = struct{}{}
 				continue
 			}
@@ -1629,7 +1629,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							result, err := s.tryAcquireAccountSlot(ctx, stickyAccountID, stickyAccount.Concurrency)
 							if err == nil && result.Acquired {
 								// 会话数量限制检查
-								if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
+								if !s.checkAndRegisterDevice(ctx, stickyAccount, sessionHash) {
 									result.ReleaseFunc() // 释放槽位
 									stickyCacheMissReason = "session_limit"
 									// 继续到负载感知选择
@@ -1645,7 +1645,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
 								if waitingCount < cfg.StickySessionMaxWaiting {
 									// 会话数量限制检查（等待计划也需要占用会话配额）
-									if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
+									if !s.checkAndRegisterDevice(ctx, stickyAccount, sessionHash) {
 										stickyCacheMissReason = "session_limit"
 										// 会话限制已满，继续到负载感知选择
 									} else {
@@ -1758,7 +1758,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					result, err := s.tryAcquireAccountSlot(ctx, item.account.ID, item.account.Concurrency)
 					if err == nil && result.Acquired {
 						// 会话数量限制检查
-						if !s.checkAndRegisterSession(ctx, item.account, sessionHash) {
+						if !s.checkAndRegisterDevice(ctx, item.account, sessionHash) {
 							result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 							continue
 						}
@@ -1779,7 +1779,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				// 5. 所有路由账号槽位满，尝试返回等待计划（选择负载最低的）
 				// 遍历找到第一个满足会话限制的账号
 				for _, item := range routingAvailable {
-					if !s.checkAndRegisterSession(ctx, item.account, sessionHash) {
+					if !s.checkAndRegisterDevice(ctx, item.account, sessionHash) {
 						continue // 会话限制已满，尝试下一个
 					}
 					if s.debugModelRoutingEnabled() {
@@ -1860,7 +1860,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					if err == nil && result.Acquired {
 						// 会话数量限制检查
 						// Session count limit check
-						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+						if !s.checkAndRegisterDevice(ctx, account, sessionHash) {
 							if s.debugModelRoutingEnabled() {
 								logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: session_limit (slot_acquired)",
 									shortSessionHash(sessionHash), accountID)
@@ -1889,7 +1889,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					if waitingCount < cfg.StickySessionMaxWaiting {
 						// 会话数量限制检查（等待计划也需要占用会话配额）
 						// Session count limit check (wait plan also requires session quota)
-						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+						if !s.checkAndRegisterDevice(ctx, account, sessionHash) {
 							if s.debugModelRoutingEnabled() {
 								logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: session_limit (wait_plan)",
 									shortSessionHash(sessionHash), accountID)
@@ -2009,7 +2009,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			result, err := s.tryAcquireAccountSlot(ctx, selected.account.ID, selected.account.Concurrency)
 			if err == nil && result.Acquired {
 				// 会话数量限制检查
-				if !s.checkAndRegisterSession(ctx, selected.account, sessionHash) {
+				if !s.checkAndRegisterDevice(ctx, selected.account, sessionHash) {
 					result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 				} else {
 					winner := s.resolveStickyRaceWinner(ctx, groupID, sessionHash, selected.account, result, accountByID)
@@ -2036,7 +2036,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
 	for _, acc := range candidates {
 		// 会话数量限制检查（等待计划也需要占用会话配额）
-		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
+		if !s.checkAndRegisterDevice(ctx, acc, sessionHash) {
 			continue // 会话限制已满，尝试下一个账号
 		}
 		return s.newSelectionResult(ctx, acc, false, nil, &AccountWaitPlan{
@@ -2057,7 +2057,7 @@ func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates
 		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
 		if err == nil && result.Acquired {
 			// 会话数量限制检查
-			if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
+			if !s.checkAndRegisterDevice(ctx, acc, sessionHash) {
 				result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 				continue
 			}
@@ -2656,34 +2656,34 @@ func (s *GatewayService) IncrementAccountRPM(ctx context.Context, accountID int6
 	return err
 }
 
-// checkAndRegisterSession 检查并注册会话，用于会话数量限制
-// 仅适用于 Anthropic OAuth/SetupToken 账号
-// sessionID: 会话标识符（使用粘性会话的 hash）
-// 返回 true 表示允许（在限制内或会话已存在），false 表示拒绝（超出限制且是新会话）
+// checkAndRegisterDevice 检查并注册设备，用于单 OAuth 账号的设备数限制。
+// 仅适用于 Anthropic OAuth/SetupToken 账号。
+// deviceID: 设备/虚拟设备标识符（使用粘性会话的 hash 作为 key）。
+// 返回 true 表示允许（在限制内或设备已注册），false 表示拒绝（超限且是新设备）。
 //
-// 注意：sessionID 传入的是 GenerateSessionHash 的返回值。当前主策略以
-// device_id 作为粘性 key（见 GenerateSessionHash），因此这里的"会话
-// 数量"实际计量的是"活跃设备数"——同设备上多个 CLI 窗口、主会话与
-// 子 agent 共用一个名额。MaxSessions/GetSessionIdleTimeoutMinutes 等
-// 配置项的语义需按此理解。
-func (s *GatewayService) checkAndRegisterSession(ctx context.Context, account *Account, sessionID string) bool {
+// 命名说明：deviceID 形参传入的是 GenerateSessionHash 的返回值。
+// 第 1 级（Claude CLI）= metadata.user_id.device_id；
+// 第 2/3 级（其他客户端）= cache_control / 内容 hash 作为虚拟 device。
+// 同 device_id 的多 CLI 窗口、主对话、子 agent 共占 1 个名额。
+// 配置项 MaxDevices / DeviceIdleTimeoutMinutes 按此粒度理解。
+func (s *GatewayService) checkAndRegisterDevice(ctx context.Context, account *Account, deviceID string) bool {
 	// 只检查 Anthropic OAuth/SetupToken 账号
 	if !account.IsAnthropicOAuthOrSetupToken() {
 		return true
 	}
 
-	maxSessions := account.GetMaxSessions()
-	if maxSessions <= 0 || sessionID == "" {
-		return true // 未启用会话限制或无会话ID
+	maxDevices := account.GetMaxDevices()
+	if maxDevices <= 0 || deviceID == "" {
+		return true // 未启用设备限制或无设备 ID
 	}
 
 	if s.sessionLimitCache == nil {
 		return true // 缓存不可用时允许通过
 	}
 
-	idleTimeout := time.Duration(account.GetSessionIdleTimeoutMinutes()) * time.Minute
+	idleTimeout := time.Duration(account.GetDeviceIdleTimeoutMinutes()) * time.Minute
 
-	allowed, err := s.sessionLimitCache.RegisterSession(ctx, account.ID, sessionID, maxSessions, idleTimeout)
+	allowed, err := s.sessionLimitCache.RegisterSession(ctx, account.ID, deviceID, maxDevices, idleTimeout)
 	if err != nil {
 		// 失败开放：缓存错误时允许通过
 		return true

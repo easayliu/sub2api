@@ -710,9 +710,10 @@ export interface Account {
   window_cost_limit?: number | null
   window_cost_sticky_reserve?: number | null
 
-  // 会话数量控制（仅 Anthropic OAuth/SetupToken 账号有效）
-  max_sessions?: number | null
-  session_idle_timeout_minutes?: number | null
+  // 设备数量控制（仅 Anthropic OAuth/SetupToken 账号有效）
+  // 同 device_id 的多 CLI 窗口、主对话、子 agent 共占 1 个名额
+  max_devices?: number | null
+  device_idle_timeout_minutes?: number | null
 
   // RPM 限制（仅 Anthropic OAuth/SetupToken 账号有效）
   base_rpm?: number | null
@@ -762,7 +763,7 @@ export interface Account {
 
   // 运行时状态（仅当启用对应限制时返回）
   current_window_cost?: number | null // 当前窗口费用
-  active_sessions?: number | null // 当前活跃会话数
+  active_devices?: number | null // 当前活跃设备数
   current_rpm?: number | null // 当前分钟 RPM 计数
 }
 

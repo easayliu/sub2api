@@ -169,10 +169,11 @@ type Account struct {
 	WindowCostLimit         *float64 `json:"window_cost_limit,omitempty"`
 	WindowCostStickyReserve *float64 `json:"window_cost_sticky_reserve,omitempty"`
 
-	// 会话数量控制（仅 Anthropic OAuth/SetupToken 账号有效）
-	// 从 extra 字段提取，方便前端显示和编辑
-	MaxSessions           *int `json:"max_sessions,omitempty"`
-	SessionIdleTimeoutMin *int `json:"session_idle_timeout_minutes,omitempty"`
+	// 设备数量控制（仅 Anthropic OAuth/SetupToken 账号有效）
+	// 同 device_id 的多 CLI 窗口、主对话、子 agent 共占 1 个名额。
+	// 从 extra 字段提取，方便前端显示和编辑。
+	MaxDevices           *int `json:"max_devices,omitempty"`
+	DeviceIdleTimeoutMin *int `json:"device_idle_timeout_minutes,omitempty"`
 
 	// RPM 限制（仅 Anthropic OAuth/SetupToken 账号有效）
 	// 从 extra 字段提取，方便前端显示和编辑

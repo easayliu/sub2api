@@ -452,8 +452,8 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"mixed_scheduling",
 		"window_cost_limit",
 		"window_cost_sticky_reserve",
-		"max_sessions",
-		"session_idle_timeout_minutes",
+		"max_devices",
+		"device_idle_timeout_minutes",
 	}
 	filtered := make(map[string]any)
 	for _, key := range keys {

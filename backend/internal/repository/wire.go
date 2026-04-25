@@ -37,12 +37,12 @@ func ProvidePricingRemoteClient(cfg *config.Config) service.PricingRemoteClient 
 	return NewPricingRemoteClient(cfg.Update.ProxyURL, cfg.Security.ProxyFallback.AllowDirectOnError)
 }
 
-// ProvideSessionLimitCache 创建会话限制缓存
-// 用于 Anthropic OAuth/SetupToken 账号的并发会话数量控制
+// ProvideSessionLimitCache 创建设备限制缓存（粘性 hash 作为设备 key）。
+// 用于 Anthropic OAuth/SetupToken 账号的活跃设备数限制。
 func ProvideSessionLimitCache(rdb *redis.Client, cfg *config.Config) service.SessionLimitCache {
 	defaultIdleTimeoutMinutes := 5 // 默认 5 分钟空闲超时
-	if cfg != nil && cfg.Gateway.SessionIdleTimeoutMinutes > 0 {
-		defaultIdleTimeoutMinutes = cfg.Gateway.SessionIdleTimeoutMinutes
+	if cfg != nil && cfg.Gateway.DeviceIdleTimeoutMinutes > 0 {
+		defaultIdleTimeoutMinutes = cfg.Gateway.DeviceIdleTimeoutMinutes
 	}
 	return NewSessionLimitCache(rdb, defaultIdleTimeoutMinutes)
 }

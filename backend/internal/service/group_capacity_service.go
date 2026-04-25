@@ -10,8 +10,8 @@ type GroupCapacitySummary struct {
 	GroupID         int64 `json:"group_id"`
 	ConcurrencyUsed int   `json:"concurrency_used"`
 	ConcurrencyMax  int   `json:"concurrency_max"`
-	SessionsUsed    int   `json:"sessions_used"`
-	SessionsMax     int   `json:"sessions_max"`
+	DevicesUsed     int   `json:"devices_used"`
+	DevicesMax      int   `json:"devices_max"`
 	RPMUsed         int   `json:"rpm_used"`
 	RPMMax          int   `json:"rpm_max"`
 }
@@ -81,9 +81,9 @@ func (s *GroupCapacityService) getGroupCapacity(ctx context.Context, groupID int
 		accountIDs = append(accountIDs, acc.ID)
 		concurrencyMax += acc.Concurrency
 
-		if ms := acc.GetMaxSessions(); ms > 0 {
-			sessionsMax += ms
-			timeout := time.Duration(acc.GetSessionIdleTimeoutMinutes()) * time.Minute
+		if md := acc.GetMaxDevices(); md > 0 {
+			sessionsMax += md
+			timeout := time.Duration(acc.GetDeviceIdleTimeoutMinutes()) * time.Minute
 			if timeout <= 0 {
 				timeout = 5 * time.Minute
 			}
@@ -123,8 +123,8 @@ func (s *GroupCapacityService) getGroupCapacity(ctx context.Context, groupID int
 	return GroupCapacitySummary{
 		ConcurrencyUsed: concurrencyUsed,
 		ConcurrencyMax:  concurrencyMax,
-		SessionsUsed:    sessionsUsed,
-		SessionsMax:     sessionsMax,
+		DevicesUsed:     sessionsUsed,
+		DevicesMax:      sessionsMax,
 		RPMUsed:         rpmUsed,
 		RPMMax:          rpmMax,
 	}, nil

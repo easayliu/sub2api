@@ -1313,55 +1313,55 @@
         <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
           <div class="mb-3 flex items-center justify-between">
             <div>
-              <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.sessionLimit.label') }}</label>
+              <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.deviceLimit.label') }}</label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                {{ t('admin.accounts.quotaControl.sessionLimit.hint') }}
+                {{ t('admin.accounts.quotaControl.deviceLimit.hint') }}
               </p>
             </div>
             <button
               type="button"
-              @click="sessionLimitEnabled = !sessionLimitEnabled"
+              @click="deviceLimitEnabled = !deviceLimitEnabled"
               :class="[
                 'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
-                sessionLimitEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+                deviceLimitEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
               ]"
             >
               <span
                 :class="[
                   'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
-                  sessionLimitEnabled ? 'translate-x-5' : 'translate-x-0'
+                  deviceLimitEnabled ? 'translate-x-5' : 'translate-x-0'
                 ]"
               />
             </button>
           </div>
 
-          <div v-if="sessionLimitEnabled" class="grid grid-cols-2 gap-4">
+          <div v-if="deviceLimitEnabled" class="grid grid-cols-2 gap-4">
             <div>
-              <label class="input-label">{{ t('admin.accounts.quotaControl.sessionLimit.maxSessions') }}</label>
+              <label class="input-label">{{ t('admin.accounts.quotaControl.deviceLimit.maxDevices') }}</label>
               <input
-                v-model.number="maxSessions"
+                v-model.number="maxDevices"
                 type="number"
                 min="1"
                 step="1"
                 class="input"
-                :placeholder="t('admin.accounts.quotaControl.sessionLimit.maxSessionsPlaceholder')"
+                :placeholder="t('admin.accounts.quotaControl.deviceLimit.maxDevicesPlaceholder')"
               />
-              <p class="input-hint">{{ t('admin.accounts.quotaControl.sessionLimit.maxSessionsHint') }}</p>
+              <p class="input-hint">{{ t('admin.accounts.quotaControl.deviceLimit.maxDevicesHint') }}</p>
             </div>
             <div>
-              <label class="input-label">{{ t('admin.accounts.quotaControl.sessionLimit.idleTimeout') }}</label>
+              <label class="input-label">{{ t('admin.accounts.quotaControl.deviceLimit.idleTimeout') }}</label>
               <div class="relative">
                 <input
-                  v-model.number="sessionIdleTimeout"
+                  v-model.number="deviceIdleTimeout"
                   type="number"
                   min="1"
                   step="1"
                   class="input pr-12"
-                  :placeholder="t('admin.accounts.quotaControl.sessionLimit.idleTimeoutPlaceholder')"
+                  :placeholder="t('admin.accounts.quotaControl.deviceLimit.idleTimeoutPlaceholder')"
                 />
                 <span class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400">{{ t('common.minutes') }}</span>
               </div>
-              <p class="input-hint">{{ t('admin.accounts.quotaControl.sessionLimit.idleTimeoutHint') }}</p>
+              <p class="input-hint">{{ t('admin.accounts.quotaControl.deviceLimit.idleTimeoutHint') }}</p>
             </div>
           </div>
         </div>
@@ -1870,9 +1870,9 @@ const antigravityMixedChannelConfirmed = ref(false)
 const windowCostEnabled = ref(false)
 const windowCostLimit = ref<number | null>(null)
 const windowCostStickyReserve = ref<number | null>(null)
-const sessionLimitEnabled = ref(false)
-const maxSessions = ref<number | null>(null)
-const sessionIdleTimeout = ref<number | null>(null)
+const deviceLimitEnabled = ref(false)
+const maxDevices = ref<number | null>(null)
+const deviceIdleTimeout = ref<number | null>(null)
 const rpmLimitEnabled = ref(false)
 const baseRpm = ref<number | null>(null)
 const rpmStrategy = ref<'tiered' | 'sticky_exempt'>('tiered')
@@ -2506,9 +2506,9 @@ function loadQuotaControlSettings(account: Account) {
   windowCostEnabled.value = false
   windowCostLimit.value = null
   windowCostStickyReserve.value = null
-  sessionLimitEnabled.value = false
-  maxSessions.value = null
-  sessionIdleTimeout.value = null
+  deviceLimitEnabled.value = false
+  maxDevices.value = null
+  deviceIdleTimeout.value = null
   rpmLimitEnabled.value = false
   baseRpm.value = null
   rpmStrategy.value = 'tiered'
@@ -2534,10 +2534,10 @@ function loadQuotaControlSettings(account: Account) {
     windowCostStickyReserve.value = account.window_cost_sticky_reserve ?? 10
   }
 
-  if (account.max_sessions != null && account.max_sessions > 0) {
-    sessionLimitEnabled.value = true
-    maxSessions.value = account.max_sessions
-    sessionIdleTimeout.value = account.session_idle_timeout_minutes ?? 5
+  if (account.max_devices != null && account.max_devices > 0) {
+    deviceLimitEnabled.value = true
+    maxDevices.value = account.max_devices
+    deviceIdleTimeout.value = account.device_idle_timeout_minutes ?? 5
   }
 
   // RPM limit
@@ -2962,12 +2962,12 @@ const handleSubmit = async () => {
       }
 
       // Session limit settings
-      if (sessionLimitEnabled.value && maxSessions.value != null && maxSessions.value > 0) {
-        newExtra.max_sessions = maxSessions.value
-        newExtra.session_idle_timeout_minutes = sessionIdleTimeout.value ?? 5
+      if (deviceLimitEnabled.value && maxDevices.value != null && maxDevices.value > 0) {
+        newExtra.max_devices = maxDevices.value
+        newExtra.device_idle_timeout_minutes = deviceIdleTimeout.value ?? 5
       } else {
-        delete newExtra.max_sessions
-        delete newExtra.session_idle_timeout_minutes
+        delete newExtra.max_devices
+        delete newExtra.device_idle_timeout_minutes
       }
 
       // RPM limit settings

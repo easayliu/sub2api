@@ -2118,9 +2118,9 @@ export default {
           stickyOnly: '5h window cost at threshold, only sticky sessions allowed',
           normal: '5h window cost normal'
         },
-        sessions: {
-          full: 'Active sessions full, new sessions must wait (idle timeout: {idle} min)',
-          normal: 'Active sessions normal (idle timeout: {idle} min)'
+        devices: {
+          full: 'Active devices full, new devices must wait (idle timeout: {idle} min)',
+          normal: 'Active devices normal (idle timeout: {idle} min)'
         },
         rpm: {
           full: 'RPM limit reached',
@@ -2389,15 +2389,15 @@ export default {
           stickyReservePlaceholder: '10',
           stickyReserveHint: 'Additional reserve for sticky sessions'
         },
-        sessionLimit: {
-          label: 'Session Count Limit',
-          hint: 'Limit the number of active concurrent sessions',
-          maxSessions: 'Max Sessions',
-          maxSessionsPlaceholder: '3',
-          maxSessionsHint: 'Maximum number of active concurrent sessions',
+        deviceLimit: {
+          label: 'Device Count Limit',
+          hint: 'Counted by device_id for Claude CLI; multiple terminals or sub-agents on the same device share one slot',
+          maxDevices: 'Max Devices',
+          maxDevicesPlaceholder: '3',
+          maxDevicesHint: 'Maximum concurrent active devices on this OAuth account',
           idleTimeout: 'Idle Timeout',
           idleTimeoutPlaceholder: '5',
-          idleTimeoutHint: 'Sessions will be released after idle timeout'
+          idleTimeoutHint: 'Devices idle for longer than this are automatically released'
         },
         rpmLimit: {
           label: 'RPM Limit',

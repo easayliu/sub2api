@@ -162,7 +162,7 @@ type AccountWithConcurrency struct {
 	CurrentConcurrency int `json:"current_concurrency"`
 	// 以下字段仅对 Anthropic OAuth/SetupToken 账号有效，且仅在启用相应功能时返回
 	CurrentWindowCost *float64 `json:"current_window_cost,omitempty"` // 当前窗口费用
-	ActiveSessions    *int     `json:"active_sessions,omitempty"`     // 当前活跃会话数
+	ActiveDevices     *int     `json:"active_devices,omitempty"`      // 当前活跃设备数
 	CurrentRPM        *int     `json:"current_rpm,omitempty"`         // 当前分钟 RPM 计数
 }
 
@@ -192,12 +192,12 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 			}
 		}
 
-		if h.sessionLimitCache != nil && account.GetMaxSessions() > 0 {
-			idleTimeout := time.Duration(account.GetSessionIdleTimeoutMinutes()) * time.Minute
+		if h.sessionLimitCache != nil && account.GetMaxDevices() > 0 {
+			idleTimeout := time.Duration(account.GetDeviceIdleTimeoutMinutes()) * time.Minute
 			idleTimeouts := map[int64]time.Duration{account.ID: idleTimeout}
 			if sessions, err := h.sessionLimitCache.GetActiveSessionCountBatch(ctx, []int64{account.ID}, idleTimeouts); err == nil {
 				if count, ok := sessions[account.ID]; ok {
-					item.ActiveSessions = &count
+					item.ActiveDevices = &count
 				}
 			}
 		}
@@ -283,9 +283,9 @@ func (h *AccountHandler) List(c *gin.Context) {
 			if acc.GetWindowCostLimit() > 0 {
 				windowCostAccountIDs = append(windowCostAccountIDs, acc.ID)
 			}
-			if acc.GetMaxSessions() > 0 {
+			if acc.GetMaxDevices() > 0 {
 				sessionLimitAccountIDs = append(sessionLimitAccountIDs, acc.ID)
-				sessionIdleTimeouts[acc.ID] = time.Duration(acc.GetSessionIdleTimeoutMinutes()) * time.Minute
+				sessionIdleTimeouts[acc.ID] = time.Duration(acc.GetDeviceIdleTimeoutMinutes()) * time.Minute
 			}
 			if acc.GetBaseRPM() > 0 {
 				rpmAccountIDs = append(rpmAccountIDs, acc.ID)
@@ -356,7 +356,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 		// 添加活跃会话数（仅当启用时）
 		if activeSessions != nil {
 			if count, ok := activeSessions[acc.ID]; ok {
-				item.ActiveSessions = &count
+				item.ActiveDevices = &count
 			}
 		}
 

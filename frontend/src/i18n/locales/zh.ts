@@ -2159,9 +2159,9 @@ export default {
           stickyOnly: '5h窗口费用达阈值，仅允许粘性会话',
           normal: '5h窗口费用正常'
         },
-        sessions: {
-          full: '活跃会话已满，新会话需等待（空闲超时：{idle}分钟）',
-          normal: '活跃会话正常（空闲超时：{idle}分钟）'
+        devices: {
+          full: '活跃设备已满，新设备需等待（空闲超时：{idle}分钟）',
+          normal: '活跃设备正常（空闲超时：{idle}分钟）'
         },
         rpm: {
           full: '已达 RPM 上限',
@@ -2532,15 +2532,15 @@ export default {
           stickyReservePlaceholder: '10',
           stickyReserveHint: '为粘性会话预留的额外额度'
         },
-        sessionLimit: {
-          label: '会话数量控制',
-          hint: '限制同时活跃的会话数量',
-          maxSessions: '最大会话数',
-          maxSessionsPlaceholder: '3',
-          maxSessionsHint: '同时活跃的最大会话数量',
+        deviceLimit: {
+          label: '设备数量控制',
+          hint: 'Claude CLI 按 device_id 计数；同设备多窗口/子 agent 共占 1 个名额',
+          maxDevices: '最大设备数',
+          maxDevicesPlaceholder: '3',
+          maxDevicesHint: '该 OAuth 账号上同时活跃的最大设备数',
           idleTimeout: '空闲超时',
           idleTimeoutPlaceholder: '5',
-          idleTimeoutHint: '会话空闲超时后自动释放'
+          idleTimeoutHint: '设备空闲超过此时长自动释放名额'
         },
         rpmLimit: {
           label: 'RPM 限制',

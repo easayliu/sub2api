@@ -226,11 +226,11 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		if reserve := a.GetWindowCostStickyReserve(); reserve > 0 {
 			out.WindowCostStickyReserve = &reserve
 		}
-		if maxSessions := a.GetMaxSessions(); maxSessions > 0 {
-			out.MaxSessions = &maxSessions
+		if maxDevices := a.GetMaxDevices(); maxDevices > 0 {
+			out.MaxDevices = &maxDevices
 		}
-		if idleTimeout := a.GetSessionIdleTimeoutMinutes(); idleTimeout > 0 {
-			out.SessionIdleTimeoutMin = &idleTimeout
+		if idleTimeout := a.GetDeviceIdleTimeoutMinutes(); idleTimeout > 0 {
+			out.DeviceIdleTimeoutMin = &idleTimeout
 		}
 		if rpm := a.GetBaseRPM(); rpm > 0 {
 			out.BaseRPM = &rpm

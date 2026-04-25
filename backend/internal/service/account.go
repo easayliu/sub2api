@@ -1722,25 +1722,30 @@ func (a *Account) GetWindowCostStickyReserve() float64 {
 	return 10.0
 }
 
-// GetMaxSessions 获取最大并发会话数
-// 返回 0 表示未启用
-func (a *Account) GetMaxSessions() int {
+// GetMaxDevices 返回单 OAuth 账号允许同时活跃的设备数上限。
+// 返回 0 表示未启用。
+//
+// 命名说明：实际计数粒度由 GenerateSessionHash 的优先级决定 ——
+// 第 1 级 metadata.user_id.device_id（Claude CLI 必走此路径）；
+// 第 2/3 级 fallback（其他客户端）以内容/上下文 hash 为虚拟 device。
+// 同 device_id 的多 CLI 窗口、主对话与子 agent 共占 1 个名额。
+func (a *Account) GetMaxDevices() int {
 	if a.Extra == nil {
 		return 0
 	}
-	if v, ok := a.Extra["max_sessions"]; ok {
+	if v, ok := a.Extra["max_devices"]; ok {
 		return parseExtraInt(v)
 	}
 	return 0
 }
 
-// GetSessionIdleTimeoutMinutes 获取会话空闲超时分钟数
-// 默认值为 5 分钟
-func (a *Account) GetSessionIdleTimeoutMinutes() int {
+// GetDeviceIdleTimeoutMinutes 返回设备名额回收的空闲超时（分钟）。
+// 默认 5 分钟。
+func (a *Account) GetDeviceIdleTimeoutMinutes() int {
 	if a.Extra == nil {
 		return 5
 	}
-	if v, ok := a.Extra["session_idle_timeout_minutes"]; ok {
+	if v, ok := a.Extra["device_idle_timeout_minutes"]; ok {
 		val := parseExtraInt(v)
 		if val > 0 {
 			return val
@@ -1779,8 +1784,8 @@ func (a *Account) GetRPMStrategy() string {
 }
 
 // GetRPMStickyBuffer 获取 RPM 粘性缓冲数量
-// Cache-driven: buffer = concurrency + maxSessions（覆盖幽灵窗口 + 稳态会话需求）
-// floor = baseRPM / 5（向后兼容 maxSessions=0 且 concurrency=0 场景）
+// Cache-driven: buffer = concurrency + maxDevices（覆盖幽灵窗口 + 稳态设备需求）
+// floor = baseRPM / 5（向后兼容 maxDevices=0 且 concurrency=0 场景）
 func (a *Account) GetRPMStickyBuffer() int {
 	if a.Extra == nil {
 		return 0
@@ -1799,17 +1804,17 @@ func (a *Account) GetRPMStickyBuffer() int {
 		return 0
 	}
 
-	// Cache-driven buffer = concurrency + maxSessions
+	// Cache-driven buffer = concurrency + maxDevices
 	conc := a.Concurrency
 	if conc < 0 {
 		conc = 0
 	}
-	sess := a.GetMaxSessions()
-	if sess < 0 {
-		sess = 0
+	devices := a.GetMaxDevices()
+	if devices < 0 {
+		devices = 0
 	}
 
-	buffer := conc + sess
+	buffer := conc + devices
 
 	// floor: 向后兼容
 	floor := base / 5

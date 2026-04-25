@@ -36,20 +36,20 @@
     </div>
 
     <!-- 会话数量限制（仅 Anthropic OAuth/SetupToken 且启用时显示） -->
-    <div v-if="showSessionLimit" class="flex items-center gap-1">
+    <div v-if="showDeviceLimit" class="flex items-center gap-1">
       <span
         :class="[
           'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium',
-          sessionLimitClass
+          deviceLimitClass
         ]"
-        :title="sessionLimitTooltip"
+        :title="deviceLimitTooltip"
       >
         <svg class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
         </svg>
-        <span class="font-mono">{{ activeSessions }}</span>
+        <span class="font-mono">{{ activeDevices }}</span>
         <span class="text-gray-400 dark:text-gray-500">/</span>
-        <span class="font-mono">{{ account.max_sessions }}</span>
+        <span class="font-mono">{{ account.max_devices }}</span>
       </span>
     </div>
 
@@ -116,17 +116,17 @@ const showWindowCost = computed(() => {
 const currentWindowCost = computed(() => props.account.current_window_cost ?? 0)
 
 // 是否显示会话限制
-const showSessionLimit = computed(() => {
+const showDeviceLimit = computed(() => {
   return (
     isAnthropicOAuthOrSetupToken.value &&
-    props.account.max_sessions !== undefined &&
-    props.account.max_sessions !== null &&
-    props.account.max_sessions > 0
+    props.account.max_devices !== undefined &&
+    props.account.max_devices !== null &&
+    props.account.max_devices > 0
   )
 })
 
 // 当前活跃会话数
-const activeSessions = computed(() => props.account.active_sessions ?? 0)
+const activeDevices = computed(() => props.account.active_devices ?? 0)
 
 // 并发状态样式
 const concurrencyClass = computed(() => {
@@ -180,11 +180,11 @@ const windowCostTooltip = computed(() => {
 })
 
 // 会话限制状态样式
-const sessionLimitClass = computed(() => {
-  if (!showSessionLimit.value) return ''
+const deviceLimitClass = computed(() => {
+  if (!showDeviceLimit.value) return ''
 
-  const current = activeSessions.value
-  const max = props.account.max_sessions || 0
+  const current = activeDevices.value
+  const max = props.account.max_devices || 0
 
   if (current >= max) {
     return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
@@ -196,17 +196,17 @@ const sessionLimitClass = computed(() => {
 })
 
 // 会话限制提示文字
-const sessionLimitTooltip = computed(() => {
-  if (!showSessionLimit.value) return ''
+const deviceLimitTooltip = computed(() => {
+  if (!showDeviceLimit.value) return ''
 
-  const current = activeSessions.value
-  const max = props.account.max_sessions || 0
-  const idle = props.account.session_idle_timeout_minutes || 5
+  const current = activeDevices.value
+  const max = props.account.max_devices || 0
+  const idle = props.account.device_idle_timeout_minutes || 5
 
   if (current >= max) {
-    return t('admin.accounts.capacity.sessions.full', { idle })
+    return t('admin.accounts.capacity.devices.full', { idle })
   }
-  return t('admin.accounts.capacity.sessions.normal', { idle })
+  return t('admin.accounts.capacity.devices.normal', { idle })
 })
 
 // 是否显示 RPM 限制
