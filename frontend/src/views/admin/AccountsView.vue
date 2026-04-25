@@ -2,7 +2,47 @@
   <AppLayout>
     <TablePageLayout>
       <template #filters>
-        <div class="flex flex-wrap-reverse items-start justify-between gap-3">
+        <!-- Mobile toolbar: bottom-sheet driven filter / actions / bulk -->
+        <AccountMobileToolbar
+          class="md:hidden"
+          v-model:searchQuery="params.search"
+          :filters="params"
+          :groups="groups"
+          :selected-count="selIds.length"
+          :has-pending-list-sync="hasPendingListSync"
+          :loading="loading"
+          :auto-refresh-enabled="autoRefreshEnabled"
+          :auto-refresh-interval-seconds="autoRefreshIntervalSeconds"
+          :auto-refresh-countdown="autoRefreshCountdown"
+          :auto-refresh-intervals="autoRefreshIntervals"
+          :toggleable-columns="toggleableColumns"
+          :is-column-visible="isColumnVisible"
+          @update:filters="(newFilters) => Object.assign(params, newFilters)"
+          @search-change="debouncedReload"
+          @filter-change="debouncedReload"
+          @update:searchQuery="debouncedReload"
+          @create="showCreate = true"
+          @refresh="handleManualRefresh"
+          @sync="showSync = true"
+          @import="showImportData = true"
+          @export="openExportDataDialog"
+          @error-passthrough="showErrorPassthrough = true"
+          @tls-fingerprint="showTLSFingerprintProfiles = true"
+          @toggle-auto-refresh="setAutoRefreshEnabled"
+          @set-auto-refresh-interval="(s) => setAutoRefreshInterval(s as (typeof autoRefreshIntervals)[number])"
+          @toggle-column="toggleColumn"
+          @clear-selection="clearSelection"
+          @select-page="selectPage"
+          @sync-pending-list="syncPendingListChanges"
+          @bulk-edit="showBulkEdit = true"
+          @bulk-delete="handleBulkDelete"
+          @bulk-reset-status="handleBulkResetStatus"
+          @bulk-refresh-token="handleBulkRefreshToken"
+          @bulk-toggle-schedulable="handleBulkToggleSchedulable"
+        />
+
+        <!-- Desktop toolbar: original layout -->
+        <div class="hidden md:flex md:flex-wrap-reverse md:items-start md:justify-between md:gap-3">
           <AccountTableFilters
             v-model:searchQuery="params.search"
             :filters="params"
@@ -129,7 +169,7 @@
         </div>
         <div
           v-if="hasPendingListSync"
-          class="mt-2 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200"
+          class="mt-2 hidden md:flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200"
         >
           <span>{{ t('admin.accounts.listPendingSyncHint') }}</span>
           <button
@@ -141,7 +181,7 @@
         </div>
       </template>
       <template #table>
-        <AccountBulkActionsBar :selected-ids="selIds" @delete="handleBulkDelete" @reset-status="handleBulkResetStatus" @refresh-token="handleBulkRefreshToken" @edit="showBulkEdit = true" @clear="clearSelection" @select-page="selectPage" @toggle-schedulable="handleBulkToggleSchedulable" />
+        <AccountBulkActionsBar class="hidden md:block" :selected-ids="selIds" @delete="handleBulkDelete" @reset-status="handleBulkResetStatus" @refresh-token="handleBulkRefreshToken" @edit="showBulkEdit = true" @clear="clearSelection" @select-page="selectPage" @toggle-schedulable="handleBulkToggleSchedulable" />
         <div ref="accountTableRef" class="flex min-h-0 flex-1 flex-col overflow-hidden">
         <DataTable
           :columns="cols"
@@ -324,6 +364,7 @@ import { CreateAccountModal, EditAccountModal, BulkEditAccountModal, SyncFromCrs
 import AccountTableActions from '@/components/admin/account/AccountTableActions.vue'
 import AccountTableFilters from '@/components/admin/account/AccountTableFilters.vue'
 import AccountBulkActionsBar from '@/components/admin/account/AccountBulkActionsBar.vue'
+import AccountMobileToolbar from '@/components/admin/account/AccountMobileToolbar.vue'
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
 import ImportDataModal from '@/components/admin/account/ImportDataModal.vue'
 import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vue'

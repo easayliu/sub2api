@@ -2038,6 +2038,26 @@ export default {
       oauthType: 'OAuth',
       setupToken: 'Setup Token',
       apiKey: 'API Key',
+      // Mobile toolbar (filter sheet / more actions sheet / chips)
+      openFilters: 'Filters',
+      clearAllFilters: 'Clear all',
+      exitMultiSelect: 'Exit multi-select',
+      filterSheet: {
+        title: 'Filters',
+        platform: 'Platform',
+        type: 'Type',
+        status: 'Status',
+        privacy: 'Privacy mode',
+        group: 'Group',
+        reset: 'Reset',
+        apply: 'Apply',
+        clear: 'Clear'
+      },
+      moreActions: {
+        title: 'More actions',
+        autoRefreshOff: 'Off',
+        bulkActions: 'Bulk actions'
+      },
       // Schedulable toggle
       schedulable: 'Schedulable',
       schedulableHint: 'Enable to include this account in API request scheduling',

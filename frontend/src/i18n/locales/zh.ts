@@ -2117,6 +2117,26 @@ export default {
       allGroups: '全部分组',
       ungroupedGroup: '未分配分组',
       oauthType: 'OAuth',
+      // Mobile toolbar (filter sheet / more actions sheet / chips)
+      openFilters: '筛选',
+      clearAllFilters: '清除筛选',
+      exitMultiSelect: '退出多选',
+      filterSheet: {
+        title: '筛选',
+        platform: '平台',
+        type: '类型',
+        status: '状态',
+        privacy: '隐私模式',
+        group: '分组',
+        reset: '重置',
+        apply: '应用',
+        clear: '清除'
+      },
+      moreActions: {
+        title: '更多操作',
+        autoRefreshOff: '已关闭',
+        bulkActions: '批量操作'
+      },
       // Schedulable toggle
       schedulable: '参与调度',
       schedulableHint: '开启后账号参与API请求调度',
