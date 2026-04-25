@@ -1,8 +1,5 @@
 <template>
-  <div
-    v-if="selectedIds.length > 0"
-    class="mb-4 flex flex-col gap-2 rounded-lg bg-primary-50 p-3 dark:bg-primary-900/20 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
-  >
+  <div v-if="selectedIds.length > 0" class="mb-4 flex items-center justify-between p-3 bg-primary-50 rounded-lg dark:bg-primary-900/20">
     <div class="flex flex-wrap items-center gap-2">
       <span class="text-sm font-medium text-primary-900 dark:text-primary-100">
         {{ t('admin.accounts.bulkActions.selected', { count: selectedIds.length }) }}
@@ -21,7 +18,7 @@
         {{ t('admin.accounts.bulkActions.clear') }}
       </button>
     </div>
-    <div class="flex flex-wrap gap-2 sm:flex-nowrap sm:justify-end">
+    <div class="flex gap-2">
       <button @click="$emit('delete')" class="btn btn-danger btn-sm">{{ t('admin.accounts.bulkActions.delete') }}</button>
       <button @click="$emit('reset-status')" class="btn btn-secondary btn-sm">{{ t('admin.accounts.bulkActions.resetStatus') }}</button>
       <button @click="$emit('refresh-token')" class="btn btn-secondary btn-sm">{{ t('admin.accounts.bulkActions.refreshToken') }}</button>

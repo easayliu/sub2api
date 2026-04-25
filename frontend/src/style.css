@@ -372,26 +372,57 @@
   }
 
   /* ============ 模态框 ============ */
+  /*
+   * Mobile: bottom-sheet (anchored to viewport bottom, rounded-top, slide-up).
+   * Desktop (sm+): centered card (original design).
+   */
   .modal-overlay {
     @apply fixed inset-0 z-50;
     @apply bg-black/50 backdrop-blur-sm;
-    @apply flex items-center justify-center;
-    @apply p-2 sm:p-4;
-    padding-top: max(0.5rem, env(safe-area-inset-top));
-    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+    @apply flex items-end justify-center sm:items-center;
+    @apply p-0 sm:p-4;
   }
 
   .modal-content {
     @apply w-full;
-    @apply max-h-[95dvh] sm:max-h-[90dvh];
+    @apply max-h-[92dvh] sm:max-h-[90dvh];
     @apply bg-white dark:bg-dark-800;
-    @apply rounded-2xl shadow-2xl;
+    @apply rounded-t-2xl rounded-b-none sm:rounded-2xl;
+    @apply shadow-2xl;
     @apply border border-gray-200 dark:border-dark-700;
     @apply flex flex-col;
+    @apply relative;
+  }
+
+  /* Drag handle (visual affordance only — pure CSS, no gesture). */
+  @media (max-width: 639.98px) {
+    /* Force full-width bottom-sheet on mobile, overriding any max-w-* utility
+       supplied by consumers. Specificity bump (.modal-overlay .modal-content)
+       ensures we beat single-class Tailwind utilities. */
+    .modal-overlay .modal-content {
+      max-width: 100%;
+    }
+
+    .modal-content::before {
+      content: '';
+      position: absolute;
+      top: 0.5rem;
+      left: 50%;
+      width: 36px;
+      height: 4px;
+      transform: translateX(-50%);
+      border-radius: 9999px;
+      background-color: rgb(209 213 219); /* gray-300 */
+    }
+
+    .dark .modal-content::before {
+      background-color: rgb(75 85 99); /* dark-600 */
+    }
   }
 
   .modal-header {
     @apply border-b border-gray-200 px-4 py-3 dark:border-dark-700;
+    @apply pt-5 sm:pt-4;
     @apply sm:px-6 sm:py-4;
     @apply flex items-center justify-between;
     @apply flex-shrink-0;
@@ -404,7 +435,7 @@
   .modal-body {
     @apply px-4 py-3;
     @apply sm:px-6 sm:py-4;
-    @apply flex-1 overflow-y-auto;
+    @apply flex-1 overflow-y-auto overscroll-contain;
   }
 
   .modal-footer {
@@ -412,6 +443,8 @@
     @apply sm:px-6 sm:py-4;
     @apply flex items-center justify-end gap-3;
     @apply flex-shrink-0;
+    /* Sticky CTA: respect iOS home-indicator safe area on mobile bottom-sheet. */
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
   }
 
   /* 防止body滚动的工具类 */
@@ -433,23 +466,38 @@
   }
 
   .modal-enter-active .modal-content {
-    transition: transform 250ms ease-out, opacity 250ms ease-out;
+    transition: transform 280ms cubic-bezier(0.32, 0.72, 0, 1), opacity 250ms ease-out;
   }
 
   .modal-leave-active .modal-content {
-    transition: transform 200ms ease-in, opacity 200ms ease-in;
+    transition: transform 220ms ease-in, opacity 200ms ease-in;
   }
 
+  /* Mobile: slide up from bottom; Desktop: scale-in. */
   .modal-enter-from .modal-content,
   .modal-leave-to .modal-content {
-    transform: scale(0.95);
+    transform: translateY(100%);
     opacity: 0;
+  }
+
+  @media (min-width: 640px) {
+    .modal-enter-from .modal-content,
+    .modal-leave-to .modal-content {
+      transform: scale(0.95);
+    }
   }
 
   .modal-enter-to .modal-content,
   .modal-leave-from .modal-content {
-    transform: scale(1);
+    transform: translateY(0);
     opacity: 1;
+  }
+
+  @media (min-width: 640px) {
+    .modal-enter-to .modal-content,
+    .modal-leave-from .modal-content {
+      transform: scale(1);
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -468,32 +516,56 @@
   }
 
   /* ============ Dialog ============ */
+  /* Mobile: bottom-sheet; Desktop: centered card. */
   .dialog-overlay {
     @apply fixed inset-0 z-50;
     @apply bg-black/40 dark:bg-black/60;
-    @apply flex items-center justify-center p-4;
+    @apply flex items-end justify-center sm:items-center;
+    @apply p-0 sm:p-4;
   }
 
   .dialog-container {
     @apply flex w-full flex-col;
-    @apply max-h-[90vh];
-    @apply rounded-2xl bg-white dark:bg-dark-800;
+    @apply max-h-[92dvh] sm:max-h-[90dvh];
+    @apply rounded-t-2xl rounded-b-none sm:rounded-2xl;
+    @apply bg-white dark:bg-dark-800;
     @apply shadow-xl;
+    @apply relative;
+  }
+
+  @media (max-width: 639.98px) {
+    .dialog-container::before {
+      content: '';
+      position: absolute;
+      top: 0.5rem;
+      left: 50%;
+      width: 36px;
+      height: 4px;
+      transform: translateX(-50%);
+      border-radius: 9999px;
+      background-color: rgb(209 213 219);
+    }
+
+    .dark .dialog-container::before {
+      background-color: rgb(75 85 99);
+    }
   }
 
   .dialog-header {
     @apply border-b border-gray-100 px-6 py-4 dark:border-dark-700;
+    @apply pt-6 sm:pt-4;
     @apply flex items-center justify-between;
   }
 
   .dialog-body {
-    @apply overflow-y-auto px-6 py-4;
+    @apply overflow-y-auto overscroll-contain px-6 py-4;
   }
 
   .dialog-footer {
     @apply border-t border-gray-100 px-6 py-4 dark:border-dark-700;
     @apply bg-gray-50/60 dark:bg-dark-900/40;
     @apply flex items-center justify-end gap-3;
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
   }
 
   /* ============ Toast 通知 ============ */
