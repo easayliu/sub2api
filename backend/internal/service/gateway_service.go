@@ -806,6 +806,12 @@ func (s *GatewayService) resolveStickyRaceWinner(
 	}
 	winnerAccount, ok := accountByID[winnerID]
 	if !ok || winnerAccount == nil {
+		// Winner missing from snapshot. Distinguish "account deleted" (permanent)
+		// from "snapshot temporarily stale" (transient) by probing the DB.
+		// Deleted binding must be cleared — otherwise every future request on
+		// this session silently falls through to Layer 2 and traffic drifts to
+		// whichever account wins there, while Redis still points at the ghost.
+		s.maybeClearDeadBinding(ctx, groupID, sessionHash, winnerID, "resolve_race_winner")
 		return nil
 	}
 	winResult, e := s.tryAcquireAccountSlot(ctx, winnerID, winnerAccount.Concurrency)
@@ -829,6 +835,53 @@ func (s *GatewayService) resolveStickyRaceWinner(
 		selfSlot.ReleaseFunc()
 	}
 	return redirected
+}
+
+// maybeClearDeadBinding deletes the session -> account binding only when the
+// target account no longer exists in the database. This differentiates a
+// ghost binding (account row deleted) from a transient snapshot miss
+// (account exists but is temporarily unschedulable, or the snapshot was
+// just rebuilt). On DB lookup error we conservatively keep the binding —
+// the cost of a false positive (wrongful delete causing one forced rebind)
+// is higher than a false negative (ghost binding persists until TTL).
+func (s *GatewayService) maybeClearDeadBinding(ctx context.Context, groupID *int64, sessionHash string, accountID int64, caller string) {
+	if sessionHash == "" || accountID <= 0 || s.cache == nil || s.accountRepo == nil {
+		return
+	}
+	exists, err := s.accountRepo.ExistsByID(ctx, accountID)
+	if err != nil {
+		logger.L().Warn("sticky.mutate",
+			zap.String("op", "exists_probe_failed"),
+			zap.String("caller", caller),
+			zap.Int64("group_id", derefGroupID(groupID)),
+			zap.String("session", shortSessionHash(sessionHash)),
+			zap.Int64("account_id", accountID),
+			zap.Error(err),
+		)
+		return
+	}
+	if exists {
+		logger.L().Info("sticky.trace",
+			zap.String("event", "snapshot_miss_account_exists"),
+			zap.String("caller", caller),
+			zap.Int64("group_id", derefGroupID(groupID)),
+			zap.String("session", shortSessionHash(sessionHash)),
+			zap.Int64("account_id", accountID),
+		)
+		return
+	}
+	logStickyMutation("delete", caller, "account_deleted", groupID, sessionHash, accountID)
+	if err := s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash); err != nil {
+		logger.L().Warn("sticky.mutate",
+			zap.String("op", "delete_failed"),
+			zap.String("caller", caller),
+			zap.String("reason", "account_deleted"),
+			zap.Int64("group_id", derefGroupID(groupID)),
+			zap.String("session", shortSessionHash(sessionHash)),
+			zap.Int64("account_id", accountID),
+			zap.Error(err),
+		)
+	}
 }
 
 // GetCachedSessionAccountID retrieves the account ID bound to a sticky session.
@@ -1627,8 +1680,12 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								stickyCacheMissReason, stickyAccountID, shortSessionHash(sessionHash), currentRPM, baseRPM)
 						}
 					} else {
-						logStickyMutation("delete", "routing_loadaware_L1.5", "sticky_account_not_in_snapshot", groupID, sessionHash, stickyAccountID)
-						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+						// Previously this path unconditionally deleted the
+						// binding on snapshot miss, which also punished
+						// transient staleness. Probe ExistsByID instead so
+						// only truly-deleted accounts have their ghost
+						// bindings cleared.
+						s.maybeClearDeadBinding(ctx, groupID, sessionHash, stickyAccountID, "routing_loadaware_L1.5")
 						logger.LegacyPrintf("service.gateway", "[debug] [StickyCacheMiss] reason=account_cleared account_id=%d session=%s current_rpm=0 base_rpm=0",
 							stickyAccountID, shortSessionHash(sessionHash))
 					}
@@ -1748,9 +1805,17 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
-			if !ok && s.debugModelRoutingEnabled() {
-				logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: not in schedulable snapshot",
-					shortSessionHash(sessionHash), accountID)
+			if !ok {
+				if s.debugModelRoutingEnabled() {
+					logger.LegacyPrintf("service.gateway", "[debug] [StickyLayer1.5] session=%s account=%d MISS: not in schedulable snapshot",
+						shortSessionHash(sessionHash), accountID)
+				}
+				// Snapshot miss has two causes: (a) account was deleted — a
+				// permanent ghost binding that silently redirects every
+				// request to whatever Layer 2 picks next; (b) account exists
+				// but is temporarily unschedulable (rate limit, overload,
+				// snapshot rebuild). Only (a) should clear the binding.
+				s.maybeClearDeadBinding(ctx, groupID, sessionHash, accountID, "loadaware_L1.5")
 			}
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定

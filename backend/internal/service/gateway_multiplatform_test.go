@@ -3423,3 +3423,67 @@ func TestGatewayService_SelectAccountForModelWithPlatform_LegacyLRUPrefersNeverU
 	require.Equal(t, int64(2), acc.ID, "with no sticky binding, LRU should still prefer never-used C")
 	require.Equal(t, int64(2), cache.sessionBindings["session-fresh"], "first-bind must write C into the cache")
 }
+
+// TestGatewayService_MaybeClearDeadBinding_DeletesWhenAccountRemoved
+// reproduces the production drift observed on 2026-04-25: a session bound
+// to an account (209) that was later removed from the DB. Every request
+// silently fell through to Layer 2 and traffic migrated to whichever
+// account the load-aware path chose, while Redis kept pointing at the
+// ghost for 48h. maybeClearDeadBinding must probe ExistsByID and delete
+// the binding so the next request establishes a fresh binding.
+func TestGatewayService_MaybeClearDeadBinding_DeletesWhenAccountRemoved(t *testing.T) {
+	ctx := context.Background()
+
+	repo := &mockAccountRepoForPlatform{
+		accounts:     []Account{{ID: 213, Platform: PlatformAnthropic, Status: StatusActive, Schedulable: true}},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+
+	cache := &mockGatewayCacheForPlatform{
+		sessionBindings: map[string]int64{"ghost-session": 209},
+	}
+
+	svc := &GatewayService{
+		accountRepo: repo,
+		cache:       cache,
+		cfg:         testConfig(),
+	}
+
+	svc.maybeClearDeadBinding(ctx, nil, "ghost-session", 209, "test")
+
+	_, stillBound := cache.sessionBindings["ghost-session"]
+	require.False(t, stillBound, "binding to deleted account 209 must be removed")
+}
+
+// TestGatewayService_MaybeClearDeadBinding_PreservesWhenAccountExists
+// guards against the false-positive case: account still exists but is
+// transiently absent from the schedulable snapshot (rate-limit, overload,
+// snapshot rebuild). maybeClearDeadBinding must NOT delete in that case —
+// doing so would force a needless rebind the moment the account recovers.
+func TestGatewayService_MaybeClearDeadBinding_PreservesWhenAccountExists(t *testing.T) {
+	ctx := context.Background()
+
+	repo := &mockAccountRepoForPlatform{
+		// 209 is still in the DB but excluded from the schedulable slice
+		// (simulating transient unschedulability). ExistsByID returns true.
+		accounts:     []Account{{ID: 213, Platform: PlatformAnthropic, Status: StatusActive, Schedulable: true}},
+		accountsByID: map[int64]*Account{213: {ID: 213}, 209: {ID: 209}},
+	}
+
+	cache := &mockGatewayCacheForPlatform{
+		sessionBindings: map[string]int64{"live-session": 209},
+	}
+
+	svc := &GatewayService{
+		accountRepo: repo,
+		cache:       cache,
+		cfg:         testConfig(),
+	}
+
+	svc.maybeClearDeadBinding(ctx, nil, "live-session", 209, "test")
+
+	require.Equal(t, int64(209), cache.sessionBindings["live-session"], "binding to a still-existing account must be preserved")
+}
