@@ -396,7 +396,35 @@ func buildSchedulerMetadataAccount(account service.Account) service.Account {
 		SessionWindowStatus:     account.SessionWindowStatus,
 		Credentials:             filterSchedulerCredentials(account.Credentials),
 		Extra:                   filterSchedulerExtra(account.Extra),
+		// AccountGroups / GroupIDs are required at the hot path:
+		// isAccountInGroup iterates AccountGroups to confirm the account
+		// belongs to the request's group. Without these, L1.5 gate check
+		// (g1_inGroup) returns false for every grouped API key, silently
+		// forcing a delete+SETNX loop on every request that drifts traffic.
+		// GroupIDs is retained for callers that read it directly.
+		AccountGroups: cloneAccountGroups(account.AccountGroups),
+		GroupIDs:      append([]int64(nil), account.GroupIDs...),
 	}
+}
+
+// cloneAccountGroups returns a shallow copy so cache mutations cannot race
+// with live readers. Only the relationship fields needed for group lookup
+// are preserved — Account/Group back-pointers are dropped to avoid cycles
+// and cut JSON size.
+func cloneAccountGroups(src []service.AccountGroup) []service.AccountGroup {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]service.AccountGroup, len(src))
+	for i, ag := range src {
+		out[i] = service.AccountGroup{
+			AccountID: ag.AccountID,
+			GroupID:   ag.GroupID,
+			Priority:  ag.Priority,
+			CreatedAt: ag.CreatedAt,
+		}
+	}
+	return out
 }
 
 func filterSchedulerCredentials(credentials map[string]any) map[string]any {
