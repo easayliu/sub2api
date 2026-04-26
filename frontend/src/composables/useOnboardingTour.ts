@@ -1,10 +1,23 @@
 import { onMounted, onUnmounted, nextTick } from 'vue'
-import { driver, type Driver, type DriveStep } from 'driver.js'
-import 'driver.js/dist/driver.css'
+import type { Driver, DriveStep } from 'driver.js'
 import { useAuthStore as useUserStore } from '@/stores/auth'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useI18n } from 'vue-i18n'
 import { getAdminSteps, getUserSteps } from '@/components/Guide/steps'
+
+// Lazy-load driver.js (JS + CSS) on first tour start to keep it out of the
+// app shell bundle. Subsequent calls share the same promise.
+type DriverFn = typeof import('driver.js')['driver']
+let driverLoader: Promise<DriverFn> | null = null
+const loadDriver = (): Promise<DriverFn> => {
+  if (!driverLoader) {
+    driverLoader = Promise.all([
+      import('driver.js'),
+      import('driver.js/dist/driver.css')
+    ]).then(([mod]) => mod.driver)
+  }
+  return driverLoader
+}
 
 export interface OnboardingOptions {
   storageKey?: string
@@ -110,8 +123,10 @@ export function useOnboardingTour(options: OnboardingOptions) {
       driverInstance.destroy()
     }
 
+    const driverFn = await loadDriver()
+
     // 创建新的 driver 实例并存储到 store
-    driverInstance = driver({
+    driverInstance = driverFn({
       showProgress: true,
       steps,
       animate: true,

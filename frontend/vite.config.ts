@@ -82,8 +82,20 @@ export default defineConfig(({ mode }) => {
               return 'vendor-vue'
             }
 
-            // UI 工具库（较大，单独分离）
-            if (id.includes('/@vueuse/') || id.includes('/xlsx/')) {
+            // xlsx is consumed via dynamic import in UsageView; keep it isolated
+            // so it stays out of the main path and only loads on export.
+            if (id.includes('/xlsx/')) {
+              return 'vendor-xlsx'
+            }
+
+            // driver.js is dynamically imported when the onboarding tour starts;
+            // keep it out of vendor-misc so it isn't pulled into the app shell.
+            if (id.includes('/driver.js/')) {
+              return 'vendor-driver'
+            }
+
+            // UI utility libs
+            if (id.includes('/@vueuse/')) {
               return 'vendor-ui'
             }
 

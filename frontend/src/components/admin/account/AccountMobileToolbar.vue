@@ -47,6 +47,20 @@
             {{ activeFilterCount }}
           </span>
         </button>
+        <button
+          type="button"
+          class="toolbar-icon-btn relative"
+          :aria-label="t('common.refresh')"
+          :disabled="loading"
+          @click="$emit('refresh')"
+        >
+          <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
+          <span
+            v-if="autoRefreshEnabled"
+            class="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-primary-500 ring-2 ring-white dark:ring-dark-900"
+            :aria-label="t('admin.accounts.autoRefresh')"
+          />
+        </button>
         <button type="button" class="toolbar-icon-btn" :aria-label="t('common.more')" @click="showMoreSheet = true">
           <Icon name="more" size="md" />
         </button>
@@ -109,7 +123,6 @@
     <!-- More actions sheet -->
     <AccountMoreActionsSheet
       :show="showMoreSheet"
-      :loading="loading"
       :auto-refresh-enabled="autoRefreshEnabled"
       :auto-refresh-interval-seconds="autoRefreshIntervalSeconds"
       :auto-refresh-countdown="autoRefreshCountdown"
@@ -118,7 +131,6 @@
       :is-column-visible="isColumnVisible"
       :selected-count="selectedCount"
       @close="showMoreSheet = false"
-      @refresh="$emit('refresh')"
       @toggle-auto-refresh="$emit('toggle-auto-refresh', $event)"
       @set-auto-refresh-interval="$emit('set-auto-refresh-interval', $event)"
       @toggle-column="$emit('toggle-column', $event)"

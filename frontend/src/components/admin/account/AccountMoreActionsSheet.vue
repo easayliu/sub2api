@@ -7,14 +7,6 @@
     @close="$emit('close')"
   >
     <ul class="divide-y divide-gray-100 dark:divide-dark-700">
-      <!-- Manual refresh -->
-      <li>
-        <button type="button" class="action-row" :disabled="loading" @click="onRefresh">
-          <Icon name="refresh" size="md" :class="['action-icon text-gray-500', loading ? 'animate-spin' : '']" />
-          <span class="action-label">{{ t('common.refresh') }}</span>
-        </button>
-      </li>
-
       <!-- Auto refresh (expandable) -->
       <li>
         <button type="button" class="action-row" @click="toggleSection('autoRefresh')">
@@ -160,7 +152,6 @@ interface ColumnOption {
 
 const props = defineProps<{
   show: boolean
-  loading?: boolean
   autoRefreshEnabled: boolean
   autoRefreshIntervalSeconds: number
   autoRefreshCountdown: number
@@ -172,7 +163,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'refresh'): void
   (e: 'toggle-auto-refresh', enabled: boolean): void
   (e: 'set-auto-refresh-interval', seconds: number): void
   (e: 'toggle-column', key: string): void
@@ -198,12 +188,6 @@ watch(
     if (!visible) expanded.value = null
   }
 )
-
-const onRefresh = () => {
-  if (props.loading) return
-  emit('refresh')
-  emit('close')
-}
 
 type FireAndCloseAction =
   | 'sync'
