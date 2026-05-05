@@ -2,14 +2,32 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
+
+// logRejected emits a warning-level structured log every time Validate rejects
+// a request at Step 4. Step 1 UA failures are intentionally not logged here:
+// random scanners / browsers / non-CLI tools constantly hit that path and the
+// noise would drown out useful signal. Anything reaching Step 4 has already
+// produced a CLI-shaped UA and is worth surfacing.
+func logRejected(r *http.Request, step, reason string, extras ...any) {
+	attrs := []any{
+		"step", step,
+		"reason", reason,
+		"ua", r.Header.Get("User-Agent"),
+		"path", r.URL.Path,
+	}
+	attrs = append(attrs, extras...)
+	slog.Warn("claude_code_validator_reject", attrs...)
+}
 
 // ClaudeCodeValidator 验证请求是否来自 Claude Code 客户端
 // 完全学习自 claude-relay-service 项目的验证逻辑
@@ -183,6 +201,7 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 
 	// 4.1 检查 system prompt 相似度
 	if !v.hasClaudeCodeSystemPrompt(body) {
+		logRejected(r, "4.1_system_prompt", "no_matching_template")
 		return false
 	}
 
@@ -195,52 +214,66 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	//   - X-Stainless-Package-Version 必须存在（值随版本变化故只校验非空）
 	//   - X-Stainless-OS 必须是 CLI 已知 OS 之一（MacOS/Linux/Windows）
 	if !strings.EqualFold(r.Header.Get("X-App"), expectedXAppValue) {
+		logRejected(r, "4.2_x_app", "mismatch", "x_app", r.Header.Get("X-App"))
 		return false
 	}
 
 	if r.Header.Get("anthropic-version") != expectedAnthropicVersion {
+		logRejected(r, "4.2_anthropic_version", "mismatch", "anthropic_version", r.Header.Get("anthropic-version"))
 		return false
 	}
 
 	if !hasRequiredCLIBetaToken(r.Header.Get("anthropic-beta")) {
+		logRejected(r, "4.2_anthropic_beta", "missing_claude_code_token", "anthropic_beta", r.Header.Get("anthropic-beta"))
 		return false
 	}
 
 	if !strings.EqualFold(r.Header.Get("anthropic-dangerous-direct-browser-access"), "true") {
+		logRejected(r, "4.2_dangerous_direct_browser_access", "not_true",
+			"value", r.Header.Get("anthropic-dangerous-direct-browser-access"))
 		return false
 	}
 
 	if !strings.EqualFold(r.Header.Get("X-Stainless-Lang"), expectedStainlessLang) {
+		logRejected(r, "4.2_x_stainless_lang", "not_js", "x_stainless_lang", r.Header.Get("X-Stainless-Lang"))
 		return false
 	}
 
 	if r.Header.Get("X-Stainless-Package-Version") == "" {
+		logRejected(r, "4.2_x_stainless_package_version", "empty")
 		return false
 	}
 
 	// X-Stainless-OS 必须是 CLI 已知的 OS 标识之一（MacOS/Linux/Windows），
 	// 同时给 4.5 的 Platform 一致性校验提供锚点。
 	if _, ok := stainlessOSToPlatform[r.Header.Get("X-Stainless-OS")]; !ok {
+		logRejected(r, "4.2_x_stainless_os", "unknown", "x_stainless_os", r.Header.Get("X-Stainless-OS"))
 		return false
 	}
 
 	// 4.3 验证 metadata.user_id（结构 + 字段级格式）
 	if body == nil {
+		logRejected(r, "4.3_metadata", "nil_body")
 		return false
 	}
 
 	metadata, ok := body["metadata"].(map[string]any)
 	if !ok {
+		logRejected(r, "4.3_metadata", "missing_or_wrong_type")
 		return false
 	}
 
 	userID, ok := metadata["user_id"].(string)
 	if !ok || userID == "" {
+		logRejected(r, "4.3_metadata_user_id", "missing_or_empty")
 		return false
 	}
 
 	parsed := ParseMetadataUserID(userID)
 	if !isStrictMetadataUserID(parsed) {
+		// user_id contains device_id; log only the length to avoid leaking
+		// fingerprint material into logs.
+		logRejected(r, "4.3_metadata_user_id_format", "invalid_format", "user_id_len", len(userID))
 		return false
 	}
 
@@ -276,15 +309,24 @@ func (v *ClaudeCodeValidator) validateEnvBlock(r *http.Request, body map[string]
 	osVersion := extractEnvLineValue(envOSVersionExtractRe, envText)
 	shell := extractEnvLineValue(envShellExtractRe, envText)
 	if platform == "" || osVersion == "" || shell == "" {
+		logRejected(r, "4.5_env_block", "missing_field",
+			"platform", platform, "os_version", osVersion, "shell", shell)
 		return false
 	}
 	if _, ok := validClaudeCodePlatforms[platform]; !ok {
+		logRejected(r, "4.5_env_block", "unknown_platform", "platform", platform)
 		return false
 	}
 
 	// X-Stainless-OS 已在 4.2 校验为合法 key，可安全索引。
-	expectedPlatform := stainlessOSToPlatform[r.Header.Get("X-Stainless-OS")]
-	return expectedPlatform == platform
+	xStainlessOS := r.Header.Get("X-Stainless-OS")
+	expectedPlatform := stainlessOSToPlatform[xStainlessOS]
+	if expectedPlatform != platform {
+		logRejected(r, "4.5_env_block", "platform_os_mismatch",
+			"platform", platform, "x_stainless_os", xStainlessOS, "expected_platform", expectedPlatform)
+		return false
+	}
+	return true
 }
 
 // findEnvBlockText 返回 body.system 中第一个含 envBlockSentinel 的 text 段。
@@ -331,6 +373,7 @@ func extractEnvLineValue(re *regexp.Regexp, text string) string {
 func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body map[string]any) bool {
 	uaVersion := ExtractCLIVersion(r.Header.Get("User-Agent"))
 	if uaVersion == "" {
+		logRejected(r, "4.4_cc_version", "ua_version_unparseable")
 		return false
 	}
 	// 老版本无 billing header，跳过该项校验
@@ -340,20 +383,34 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 
 	billingText, ok := findBillingHeaderText(body)
 	if !ok {
+		logRejected(r, "4.4_cc_version", "billing_header_missing", "ua_version", uaVersion)
 		return false
 	}
 
 	matches := ccVersionParseRe.FindStringSubmatch(billingText)
 	if matches == nil {
+		logRejected(r, "4.4_cc_version", "cc_version_unparseable",
+			"ua_version", uaVersion, "billing_text", billingText)
 		return false
 	}
 	parsedVersion, parsedSuffix := matches[1], matches[2]
 	if parsedVersion != uaVersion {
+		logRejected(r, "4.4_cc_version", "version_ua_mismatch",
+			"ua_version", uaVersion, "parsed_version", parsedVersion)
 		return false
 	}
 
-	expected := computeBillingHeaderSuffixFromText(extractFirstUserMessageTextFromMap(body), uaVersion)
-	return parsedSuffix == expected
+	firstUserText := extractFirstUserMessageTextFromMap(body)
+	expected := computeBillingHeaderSuffixFromText(firstUserText, uaVersion)
+	if parsedSuffix != expected {
+		logRejected(r, "4.4_cc_version", "suffix_mismatch",
+			"ua_version", uaVersion,
+			"parsed_suffix", parsedSuffix,
+			"expected_suffix", expected,
+			"first_user_text_runes", utf8.RuneCountInString(firstUserText))
+		return false
+	}
+	return true
 }
 
 // findBillingHeaderText 返回 body.system 中以 "x-anthropic-billing-header" 起首
