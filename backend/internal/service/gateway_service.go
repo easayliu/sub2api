@@ -1071,7 +1071,7 @@ func marshalAnthropicSystemTextBlock(text string, includeCacheControl bool) ([]b
 		Text: text,
 	}
 	if includeCacheControl {
-		// Match CLI 2.1.107 direct traffic: every system text block carries
+		// Match CLI 2.1.123 direct traffic: every system text block carries
 		// ttl:"1h". Without prompt-caching-scope-2026-01-05 beta the ttl
 		// field is ignored by upstream, which is a no-op fallback.
 		block.CacheControl = &anthropicCacheControlPayload{Type: "ephemeral", TTL: "1h"}
@@ -4157,7 +4157,7 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 }
 
 // rewriteSystemForNonClaudeCode 将非 Claude Code 客户端的 system 字段重组为
-// 直连 CLI 2.1.107 抓包的 4 块结构：
+// 直连 CLI 2.1.123 抓包的 4 块结构：
 //
 //	[0] x-anthropic-billing-header（cc_version 由 syncBillingHeaderVersion 后置同步，
 //	    cch 固定 00000 占位）— 无 cache_control
@@ -4195,7 +4195,7 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 	blocks := []anthropicSystemTextBlockPayload{
 		{
 			Type: "text",
-			Text: "x-anthropic-billing-header: cc_version=2.1.107.c33; cc_entrypoint=cli; cch=00000;",
+			Text: "x-anthropic-billing-header: cc_version=2.1.123.d8c; cc_entrypoint=cli; cch=00000;",
 		},
 		{
 			Type: "text",
@@ -4286,7 +4286,7 @@ func mimicCLIMessages(body []byte) []byte {
 	return out
 }
 
-// mimicCLIBodyFields injects the three top-level fields CLI 2.1.107 unconditionally
+// mimicCLIBodyFields injects the three top-level fields CLI 2.1.123 unconditionally
 // sends on non-haiku /v1/messages requests so mimic traffic matches direct-CLI shape:
 //
 //   - thinking:            {type: "adaptive"}
@@ -4621,7 +4621,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		body = mimicCLIBodyFields(body, reqModel)
 	}
 
-	// Align cache_control ttl with direct-CLI traffic. CLI 2.1.107 downgrades
+	// Align cache_control ttl with direct-CLI traffic. CLI 2.1.123 downgrades
 	// to bare {type:"ephemeral"} when routing through a non-Anthropic endpoint;
 	// upgrade back to ttl:"1h" (+ scope:"global" on the agent-instructions block)
 	// so OAuth accounts see the same cache behavior regardless of endpoint.
@@ -6199,13 +6199,6 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 					}
 				}
 			}
-
-			// 3. Normalize the Claude Code system-prompt env block (Platform /
-			// OS Version / Shell). Gated on fingerprint unification so it stays
-			// in sync with X-Stainless-OS/Arch rewrites.
-			if enableFP {
-				body = s.identityService.RewriteEnvSection(body, fp)
-			}
 		}
 	}
 
@@ -6257,15 +6250,10 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// OAuth账号：应用缓存的指纹到请求头（覆盖白名单透传的头）。
-	// 真 Claude Code CLI 直接透传：客户端已发出规范头，不用缓存指纹覆盖；
+	// 真 Claude Code CLI 直接透传：客户端已发出规范头，原样上行；
 	// 仅 mimic 客户端或非 OAuth 路径需要应用指纹。
 	if fingerprint != nil && (mimicClaudeCode || tokenType != "oauth") {
 		s.identityService.ApplyFingerprint(req, fingerprint)
-	} else if fingerprint != nil && enableFP {
-		// Real Claude Code CLI passthrough path: keep UA / cc_version verbatim
-		// but still overwrite X-Stainless-OS/Arch so they match the locked Mac
-		// profile used in the rewritten system-prompt env block.
-		s.identityService.ApplyOSFingerprint(req, fingerprint)
 	}
 
 	// 确保必要的headers存在（保持原始大小写）
@@ -6305,7 +6293,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			// this as a legitimate Claude Code request; without it, the request is
 			// rejected as third-party ("out of extra usage").
 			// Haiku models are exempt from third-party detection and don't need it.
-			// CLI 2.1.107 sends these on every /v1/messages call regardless of model;
+			// CLI 2.1.123 sends these on every /v1/messages call regardless of model;
 			// keep them required so apiurl traffic matches direct-CLI baseline.
 			requiredBetas := []string{
 				claude.BetaOAuth,
@@ -6315,10 +6303,12 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 				claude.BetaPromptCachingScope,
 			}
 			if !strings.Contains(strings.ToLower(modelID), "haiku") {
-				// Order matches CLI 2.1.107 direct-to-Anthropic captures exactly:
+				// Order matches CLI 2.1.123 direct-to-Anthropic captures exactly:
 				// claude-code, oauth, context-1m, interleaved-thinking, redact-thinking,
-				// context-management, prompt-caching-scope, advisor-tool,
-				// advanced-tool-use, effort. Token order is part of the wire fingerprint.
+				// context-management, prompt-caching-scope, advanced-tool-use, effort.
+				// Token order is part of the wire fingerprint.
+				// Note: advisor-tool-2026-03-01 (carried by CLI 2.1.110) is no longer
+				// emitted unconditionally as of 2.1.123; do not include it here.
 				requiredBetas = []string{
 					claude.BetaClaudeCode,
 					claude.BetaOAuth,
@@ -6327,7 +6317,6 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 					claude.BetaRedactThinking,
 					claude.BetaContextManagement,
 					claude.BetaPromptCachingScope,
-					claude.BetaAdvisorTool,
 					claude.BetaAdvancedToolUse,
 					claude.BetaEffort,
 				}
@@ -6335,7 +6324,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
 		} else {
 			// Claude Code 客户端（非 mimic）：透传原始 header，补齐 oauth +
-			// advisor-tool / advanced-tool-use 等 CLI 2.1.110 必发 token。
+			// advanced-tool-use / effort 等 CLI 2.1.123 必发 token。
 			// 客户端经反代到达时可能丢失部分 beta token，按真实 CLI wire
 			// 顺序合并补齐，避免上游指纹差异。
 			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
@@ -6355,7 +6344,6 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 					claude.BetaRedactThinking,
 					claude.BetaContextManagement,
 					claude.BetaPromptCachingScope,
-					claude.BetaAdvisorTool,
 					claude.BetaAdvancedToolUse,
 					claude.BetaEffort,
 				}
@@ -6377,7 +6365,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖。
-	// For mimic traffic CLI 2.1.107 always sends this header; for real CLI we update
+	// For mimic traffic CLI 2.1.123 always sends this header; for real CLI we update
 	// an existing value in place when metadata.user_id carries a session_id.
 	if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
 		if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != "" {
@@ -6386,13 +6374,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			}
 		}
 	}
-	// Real CLI 2.1.107 emits X-Claude-Code-Session-Id on every /v1/messages call; if
+	// Real CLI 2.1.123 emits X-Claude-Code-Session-Id on every /v1/messages call; if
 	// the mimic request still has no value (no parseable metadata.user_id), fall back
 	// to a fresh UUID so the header is always present for mimic traffic.
 	if mimicClaudeCode && getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") == "" {
 		setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", generateRandomUUID())
 	}
-	// Real CLI 2.1.107 emits a fresh x-client-request-id UUID on every request;
+	// Real CLI 2.1.123 emits a fresh x-client-request-id UUID on every request;
 	// mimic traffic must do the same to avoid missing-header fingerprinting.
 	if mimicClaudeCode {
 		setHeaderRaw(req.Header, "x-client-request-id", generateRandomUUID())
@@ -6821,7 +6809,7 @@ var defaultDroppedBetasSet = buildBetaTokenSet(claude.DroppedBetas)
 // This mirrors opencode-anthropic-auth behavior: do not trust downstream
 // headers when using Claude Code-scoped OAuth credentials.
 //
-// The isStream parameter is retained for signature stability; real CLI 2.1.107
+// The isStream parameter is retained for signature stability; real CLI 2.1.123
 // captures never emit x-stainless-helper-method on streaming requests, so this
 // value is intentionally unused.
 func applyClaudeCodeMimicHeaders(req *http.Request, _ bool) {
@@ -6840,7 +6828,7 @@ func applyClaudeCodeMimicHeaders(req *http.Request, _ bool) {
 	}
 	// Real Claude CLI uses Accept: application/json (even for streaming).
 	setHeaderRaw(req.Header, "Accept", "application/json")
-	// CLI 2.1.107 traffic does not emit x-stainless-helper-method; strip any
+	// CLI 2.1.123 traffic does not emit x-stainless-helper-method; strip any
 	// leaked value inherited from client headers or earlier mimic passes.
 	req.Header.Del("x-stainless-helper-method")
 	req.Header.Del("X-Stainless-Helper-Method")
@@ -9214,11 +9202,6 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 					}
 				}
 			}
-			// Normalize the Claude Code system-prompt env block (Platform /
-			// OS Version / Shell) to match the locked Mac profile.
-			if ctEnableFP {
-				body = s.identityService.RewriteEnvSection(body, fp)
-			}
 		}
 	}
 
@@ -9257,16 +9240,11 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// OAuth accounts: apply the cached fingerprint to request headers, gated
-	// by the fingerprint-unification setting. Real Claude Code CLI traffic is
-	// passed through (UA / Runtime stay verbatim) but X-Stainless-OS/Arch are
-	// still overwritten so they match the system-prompt env block.
-	if ctEnableFP && ctFingerprint != nil {
-		if mimicClaudeCode {
-			s.identityService.ApplyFingerprint(req, ctFingerprint)
-		} else {
-			s.identityService.ApplyOSFingerprint(req, ctFingerprint)
-		}
+	// OAuth accounts: apply the cached fingerprint to request headers for
+	// mimic clients only (gated by the fingerprint-unification setting).
+	// Real Claude Code CLI traffic is passed through verbatim.
+	if ctEnableFP && ctFingerprint != nil && mimicClaudeCode {
+		s.identityService.ApplyFingerprint(req, ctFingerprint)
 	}
 
 	// 确保必要的 headers 存在（保持原始大小写）

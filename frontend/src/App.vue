@@ -42,11 +42,56 @@ watch(
   { immediate: true }
 )
 
-// Watch for authentication state and manage subscription data + announcements
-function onVisibilityChange() {
-  if (document.visibilityState === 'visible' && authStore.isAuthenticated) {
-    announcementStore.fetchAnnouncements()
+// Track when the tab was last hidden so we can recover from long background
+// freezes (timers throttled, tokens silently expired) on visibility return.
+const VISIBILITY_RECOVERY_THRESHOLD_MS = 30_000
+let lastHiddenAt: number | null = null
+let isRecovering = false
+
+async function runVisibilityRecovery(): Promise<void> {
+  if (isRecovering) return
+  isRecovering = true
+  try {
+    const ok = await authStore.revalidateSession()
+    if (!ok) return
+
+    subscriptionStore.fetchActiveSubscriptions(true).catch((error) => {
+      console.error('Failed to refresh subscriptions on resume:', error)
+    })
+
+    // Notify view-level components that may want to re-fetch their own data.
+    try {
+      window.dispatchEvent(new CustomEvent('app:resumed'))
+    } catch {
+      // ignore environments without CustomEvent
+    }
+  } finally {
+    isRecovering = false
   }
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'hidden') {
+    lastHiddenAt = Date.now()
+    return
+  }
+
+  if (!authStore.isAuthenticated) {
+    lastHiddenAt = null
+    return
+  }
+
+  const hiddenFor = lastHiddenAt !== null ? Date.now() - lastHiddenAt : 0
+  lastHiddenAt = null
+
+  if (hiddenFor >= VISIBILITY_RECOVERY_THRESHOLD_MS) {
+    runVisibilityRecovery().then(() => {
+      announcementStore.fetchAnnouncements()
+    })
+    return
+  }
+
+  announcementStore.fetchAnnouncements()
 }
 
 watch(

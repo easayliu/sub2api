@@ -268,7 +268,7 @@ func TestInjectClaudeCodePrompt(t *testing.T) {
 			require.Equal(t, tt.wantFirstText, first["text"])
 			require.Equal(t, "text", first["type"])
 
-			// Check cache_control (CLI 2.1.107 emits ttl:"1h" on every system block)
+			// Check cache_control (CLI 2.1.123 emits ttl:"1h" on every system block)
 			cc, ok := first["cache_control"].(map[string]any)
 			require.True(t, ok)
 			require.Equal(t, "ephemeral", cc["type"])
@@ -284,7 +284,7 @@ func TestInjectClaudeCodePrompt(t *testing.T) {
 }
 
 func TestRewriteSystemForNonClaudeCode(t *testing.T) {
-	const billingHeaderText = "x-anthropic-billing-header: cc_version=2.1.107.c33; cc_entrypoint=cli; cch=00000;"
+	const billingHeaderText = "x-anthropic-billing-header: cc_version=2.1.123.d8c; cc_entrypoint=cli; cch=00000;"
 
 	tests := []struct {
 		name              string
@@ -357,7 +357,7 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			systemArr, ok := parsed["system"].([]any)
 			require.True(t, ok, "system should be an array, got %T", parsed["system"])
 			require.Len(t, systemArr, 4,
-				"system always has 4 blocks: billing + banner + agent + env (matches CLI 2.1.107 capture)")
+				"system always has 4 blocks: billing + banner + agent + env (matches CLI 2.1.123 capture)")
 
 			block0, ok := systemArr[0].(map[string]any)
 			require.True(t, ok, "system[0] should be an object, got %T", systemArr[0])

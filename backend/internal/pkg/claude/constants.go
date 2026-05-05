@@ -17,7 +17,7 @@ const (
 	BetaAdvancedToolUse = "advanced-tool-use-2025-11-20"
 	BetaAdvisorTool     = "advisor-tool-2026-03-01"
 	BetaEffort          = "effort-2025-11-24"
-	// Claude CLI 2.1.107 unconditional beta tokens on every /v1/messages call
+	// Claude CLI 2.1.123 unconditional beta tokens on every /v1/messages call
 	// (both haiku and non-haiku). Required so apiurl traffic looks like direct CLI.
 	BetaRedactThinking     = "redact-thinking-2026-02-12"
 	BetaContextManagement  = "context-management-2025-06-27"
@@ -29,7 +29,7 @@ const (
 var DroppedBetas = []string{}
 
 // DefaultBetaHeader Claude Code 客户端默认的 anthropic-beta header
-// Aligned with CLI 2.1.107 baseline: drops fine-grained-tool-streaming (no longer
+// Aligned with CLI 2.1.123 baseline: drops fine-grained-tool-streaming (no longer
 // emitted by CLI) and adds the redact-thinking / context-management / prompt-caching-scope
 // tokens CLI now sends on every /v1/messages call.
 const DefaultBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," +
@@ -52,7 +52,7 @@ const MessageBetaHeaderWithTools = BetaClaudeCode + "," + BetaOAuth + "," + Beta
 const CountTokensBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," + BetaTokenCounting
 
 // HaikuBetaHeader Haiku 模型使用的 anthropic-beta header（不需要 claude-code beta）
-// CLI 2.1.107 haiku traffic always carries the redact-thinking / context-management /
+// CLI 2.1.123 haiku traffic always carries the redact-thinking / context-management /
 // prompt-caching-scope trio; claude-code beta is optional (sometimes present on
 // agentic haiku calls, absent on quota/title-gen calls).
 const HaikuBetaHeader = BetaOAuth + "," + BetaInterleavedThinking + "," +
@@ -68,7 +68,8 @@ const APIKeyHaikuBetaHeader = BetaInterleavedThinking
 var DefaultHeaders = map[string]string{
 	// Keep these in sync with recent Claude CLI traffic to reduce the chance
 	// that Claude Code-scoped OAuth credentials are rejected as "non-CLI" usage.
-	"User-Agent":                                "claude-cli/2.1.110 (external, cli)",
+	// Reference: capture/2.1.123/003_161822_..._v1_messages?beta=true.json.
+	"User-Agent":                                "claude-cli/2.1.123 (external, cli)",
 	"X-Stainless-Lang":                          "js",
 	"X-Stainless-Package-Version":               "0.81.0",
 	"X-Stainless-OS":                            "MacOS",

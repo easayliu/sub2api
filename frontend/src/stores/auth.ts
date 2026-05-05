@@ -364,6 +364,51 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /**
+   * Re-validate the session after a long tab-hide.
+   *
+   * Browsers freeze background tabs, so the proactive `setTimeout` for token
+   * refresh may have been delayed past expiry, and the response interceptor
+   * only mirrors refreshed tokens to localStorage — store refs go stale.
+   * This action cancels the backed-up timer, drives a fresh `/auth/me` call
+   * (letting the interceptor renew tokens on 401), then re-syncs state from
+   * localStorage and re-arms the proactive refresh.
+   *
+   * @returns true if the session is still valid, false otherwise
+   */
+  async function revalidateSession(): Promise<boolean> {
+    if (!token.value) {
+      return false
+    }
+
+    // Cancel any pending proactive refresh that may fire immediately on unfreeze
+    // and race with the interceptor-driven refresh below.
+    stopTokenRefresh()
+
+    try {
+      await refreshUser()
+    } catch {
+      return false
+    }
+
+    // The response interceptor refreshes tokens directly into localStorage but
+    // does not write back to Pinia state — re-sync here.
+    const savedToken = localStorage.getItem(AUTH_TOKEN_KEY)
+    const savedRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
+    const savedExpiresAt = localStorage.getItem(TOKEN_EXPIRES_AT_KEY)
+    if (savedToken) {
+      token.value = savedToken
+    }
+    refreshTokenValue.value = savedRefreshToken
+    tokenExpiresAt.value = savedExpiresAt ? parseInt(savedExpiresAt, 10) : null
+
+    if (refreshTokenValue.value && tokenExpiresAt.value !== null) {
+      scheduleTokenRefreshAt(tokenExpiresAt.value)
+    }
+
+    return true
+  }
+
+  /**
    * Clear all authentication state
    * Internal helper function
    */
@@ -403,6 +448,7 @@ export const useAuthStore = defineStore('auth', () => {
     setToken,
     logout,
     checkAuth,
-    refreshUser
+    refreshUser,
+    revalidateSession
   }
 })

@@ -764,7 +764,7 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			require.True(t, system.IsArray(), "system should be an array")
 			blocks := system.Array()
 			require.Len(t, blocks, 4,
-				"system should have 4 blocks: billing + banner + agent + env (CLI 2.1.107 layout)")
+				"system should have 4 blocks: billing + banner + agent + env (CLI 2.1.123 layout)")
 
 			// system[0]: sub2api 注入的 billing header (无 cache_control)
 			require.Contains(t, blocks[0].Get("text").String(), "x-anthropic-billing-header:")
