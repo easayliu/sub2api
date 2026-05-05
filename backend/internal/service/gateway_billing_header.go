@@ -34,16 +34,15 @@ var cchAnyValueRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcch=
 
 const cchSeed uint64 = 0x6E52736AC806831E
 
-// computeBillingHeaderSuffix derives the 3-hex-char suffix appended to
-// cc_version per the CLI v2.1.77+ algorithm:
+// computeBillingHeaderSuffixFromText is the pure suffix derivation used by
+// the CLI v2.1.77+ algorithm:
 //
 //	chars  = text[4] + text[7] + text[20]   (default '0' if out of range)
 //	suffix = sha256(salt + chars + version).hex()[:3]
 //
-// where `text` is the first user message's text in the body. Mirrors the
-// real CLI so the suffix varies per-request just like direct traffic.
-func computeBillingHeaderSuffix(body []byte, version string) string {
-	text := extractFirstUserMessageText(body)
+// Decoupled from JSON parsing so callers that already hold the first-user
+// message text (e.g. validator paths working from a parsed map) can reuse it.
+func computeBillingHeaderSuffixFromText(text, version string) string {
 	runes := []rune(text)
 	var sb strings.Builder
 	for _, p := range billingHeaderSuffixPositions {
@@ -55,6 +54,13 @@ func computeBillingHeaderSuffix(body []byte, version string) string {
 	}
 	sum := sha256.Sum256([]byte(billingHeaderSuffixSalt + sb.String() + version))
 	return hex.EncodeToString(sum[:])[:3]
+}
+
+// computeBillingHeaderSuffix derives the cc_version suffix from a raw JSON
+// body. Convenience wrapper around computeBillingHeaderSuffixFromText for
+// callers that hold body bytes.
+func computeBillingHeaderSuffix(body []byte, version string) string {
+	return computeBillingHeaderSuffixFromText(extractFirstUserMessageText(body), version)
 }
 
 // extractFirstUserMessageText returns the user-authored text of the first

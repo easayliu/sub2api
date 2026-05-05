@@ -160,9 +160,13 @@ func TestSetClaudeCodeClientContext_FastPathAndStrictPath(t *testing.T) {
 	t.Run("cli_messages_path_valid_body_sets_true", func(t *testing.T) {
 		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
 		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1")
-		c.Request.Header.Set("X-App", "claude-code")
-		c.Request.Header.Set("anthropic-beta", "message-batches-2024-09-24")
+		c.Request.Header.Set("X-App", "cli")
+		c.Request.Header.Set("anthropic-beta", "claude-code-20250219")
 		c.Request.Header.Set("anthropic-version", "2023-06-01")
+		c.Request.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+		c.Request.Header.Set("X-Stainless-Lang", "js")
+		c.Request.Header.Set("X-Stainless-Package-Version", "0.81.0")
+		c.Request.Header.Set("X-Stainless-OS", "MacOS")
 
 		SetClaudeCodeClientContext(c, validClaudeCodeBodyJSON(), nil)
 		require.True(t, service.IsClaudeCodeClient(c.Request.Context()))
@@ -181,9 +185,13 @@ func TestSetClaudeCodeClientContext_ReuseParsedRequestAndContextCache(t *testing
 	t.Run("reuse parsed request without body unmarshal", func(t *testing.T) {
 		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
 		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1")
-		c.Request.Header.Set("X-App", "claude-code")
-		c.Request.Header.Set("anthropic-beta", "message-batches-2024-09-24")
+		c.Request.Header.Set("X-App", "cli")
+		c.Request.Header.Set("anthropic-beta", "claude-code-20250219")
 		c.Request.Header.Set("anthropic-version", "2023-06-01")
+		c.Request.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+		c.Request.Header.Set("X-Stainless-Lang", "js")
+		c.Request.Header.Set("X-Stainless-Package-Version", "0.81.0")
+		c.Request.Header.Set("X-Stainless-OS", "MacOS")
 
 		parsedReq := &service.ParsedRequest{
 			Model: "claude-3-5-sonnet-20241022",
@@ -201,9 +209,13 @@ func TestSetClaudeCodeClientContext_ReuseParsedRequestAndContextCache(t *testing
 	t.Run("reuse context cache without body unmarshal", func(t *testing.T) {
 		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
 		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1")
-		c.Request.Header.Set("X-App", "claude-code")
-		c.Request.Header.Set("anthropic-beta", "message-batches-2024-09-24")
+		c.Request.Header.Set("X-App", "cli")
+		c.Request.Header.Set("anthropic-beta", "claude-code-20250219")
 		c.Request.Header.Set("anthropic-version", "2023-06-01")
+		c.Request.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+		c.Request.Header.Set("X-Stainless-Lang", "js")
+		c.Request.Header.Set("X-Stainless-Package-Version", "0.81.0")
+		c.Request.Header.Set("X-Stainless-OS", "MacOS")
 		c.Set(service.OpenAIParsedRequestBodyKey, map[string]any{
 			"model": "claude-3-5-sonnet-20241022",
 			"system": []any{

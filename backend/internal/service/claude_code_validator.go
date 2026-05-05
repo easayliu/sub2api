@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
@@ -23,7 +24,92 @@ var (
 
 	// System prompt 相似度阈值（默认 0.5，和 claude-relay-service 一致）
 	systemPromptThreshold = 0.5
+
+	// metadataDeviceIDPattern matches a 64-char hex device id used by the CLI.
+	metadataDeviceIDPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
+
+	// metadataSessionIDPattern matches a 36-char UUID-like session id.
+	metadataSessionIDPattern = regexp.MustCompile(`^[a-fA-F0-9-]{36}$`)
+
+	// ccVersionParseRe extracts cc_version=X.Y.Z.SSS from a billing header
+	// text segment. The captures are (X.Y.Z, SSS).
+	ccVersionParseRe = regexp.MustCompile(`cc_version=(\d+\.\d+\.\d+)\.([0-9a-f]+)`)
+
+	// envPlatformExtractRe / envOSVersionExtractRe / envShellExtractRe extract
+	// the value portion of the corresponding `- Field: value` line inside the
+	// Claude Code system-prompt env block.
+	envPlatformExtractRe  = regexp.MustCompile(`(?m)^[ \t]*-[ \t]+Platform:[ \t]+([^\r\n]+)`)
+	envOSVersionExtractRe = regexp.MustCompile(`(?m)^[ \t]*-[ \t]+OS Version:[ \t]+([^\r\n]+)`)
+	envShellExtractRe     = regexp.MustCompile(`(?m)^[ \t]*-[ \t]+Shell:[ \t]+([^\r\n]+)`)
 )
+
+// validClaudeCodePlatforms enumerates the Platform values that the official
+// CLI writes into the env block. Anything else means the prompt was forged.
+var validClaudeCodePlatforms = map[string]struct{}{
+	"darwin": {},
+	"linux":  {},
+	"win32":  {},
+}
+
+// stainlessOSToPlatform maps X-Stainless-OS header values to the Platform
+// string the CLI emits in the env block. Used to enforce that the wire-level
+// OS fingerprint and the prompt-level env block stay in sync.
+var stainlessOSToPlatform = map[string]string{
+	"MacOS":   "darwin",
+	"Linux":   "linux",
+	"Windows": "win32",
+}
+
+// billingHeaderMinVersion is the first CLI release that emits the
+// x-anthropic-billing-header system segment. Validation only enforces its
+// presence/correctness on requests claiming a UA at or above this version.
+const billingHeaderMinVersion = "2.1.77"
+
+// expectedAnthropicVersion is the only Anthropic API version the official
+// Claude CLI sends; non-matching values are treated as forged traffic.
+const expectedAnthropicVersion = "2023-06-01"
+
+// expectedXAppValue is the X-App header value emitted by the official CLI
+// (see internal/pkg/claude/constants.go DefaultHeaders).
+const expectedXAppValue = "cli"
+
+// expectedStainlessLang is the X-Stainless-Lang value the Anthropic Node SDK
+// (which the CLI ships) hard-codes for every request. Any deviation indicates
+// a non-CLI client, so we treat it as a strict equality check.
+const expectedStainlessLang = "js"
+
+// hasRequiredCLIBetaToken reports whether the comma-separated anthropic-beta
+// header carries the canonical CLI identifier token. Real Claude CLI traffic
+// (>= 2.1.x) always emits claude.BetaClaudeCode on /v1/messages outside of
+// haiku probes, so requiring it raises the cost of forging the header.
+func hasRequiredCLIBetaToken(header string) bool {
+	if header == "" {
+		return false
+	}
+	for _, raw := range strings.Split(header, ",") {
+		if strings.TrimSpace(raw) == claude.BetaClaudeCode {
+			return true
+		}
+	}
+	return false
+}
+
+// isStrictMetadataUserID enforces the field-level format expected from the
+// official CLI on top of ParseMetadataUserID's structural parsing. The legacy
+// format already enforces these via regex, so this primarily tightens the
+// JSON branch where ParseMetadataUserID only checks for non-empty fields.
+func isStrictMetadataUserID(parsed *ParsedUserID) bool {
+	if parsed == nil {
+		return false
+	}
+	if !metadataDeviceIDPattern.MatchString(parsed.DeviceID) {
+		return false
+	}
+	if !metadataSessionIDPattern.MatchString(parsed.SessionID) {
+		return false
+	}
+	return true
+}
 
 // Claude Code 官方 System Prompt 模板
 // 从 claude-relay-service/src/utils/contents.js 提取
@@ -100,23 +186,45 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 		return false
 	}
 
-	// 4.2 检查必需的 headers（值不为空即可）
-	xApp := r.Header.Get("X-App")
-	if xApp == "" {
+	// 4.2 严格校验必需的 headers，对齐真实 CLI 抓包指纹
+	//   - X-App 必须等于官方 CLI 发出的 "cli"（大小写不敏感以兼容代理改写）
+	//   - anthropic-version 必须等于官方稳定版本 "2023-06-01"
+	//   - anthropic-beta 必须包含 CLI 标识 token claude-code-20250219
+	//   - anthropic-dangerous-direct-browser-access 必须等于 "true"（CLI 硬编码）
+	//   - X-Stainless-Lang 必须等于 "js"（Node SDK 固定值）
+	//   - X-Stainless-Package-Version 必须存在（值随版本变化故只校验非空）
+	//   - X-Stainless-OS 必须是 CLI 已知 OS 之一（MacOS/Linux/Windows）
+	if !strings.EqualFold(r.Header.Get("X-App"), expectedXAppValue) {
 		return false
 	}
 
-	anthropicBeta := r.Header.Get("anthropic-beta")
-	if anthropicBeta == "" {
+	if r.Header.Get("anthropic-version") != expectedAnthropicVersion {
 		return false
 	}
 
-	anthropicVersion := r.Header.Get("anthropic-version")
-	if anthropicVersion == "" {
+	if !hasRequiredCLIBetaToken(r.Header.Get("anthropic-beta")) {
 		return false
 	}
 
-	// 4.3 验证 metadata.user_id
+	if !strings.EqualFold(r.Header.Get("anthropic-dangerous-direct-browser-access"), "true") {
+		return false
+	}
+
+	if !strings.EqualFold(r.Header.Get("X-Stainless-Lang"), expectedStainlessLang) {
+		return false
+	}
+
+	if r.Header.Get("X-Stainless-Package-Version") == "" {
+		return false
+	}
+
+	// X-Stainless-OS 必须是 CLI 已知的 OS 标识之一（MacOS/Linux/Windows），
+	// 同时给 4.5 的 Platform 一致性校验提供锚点。
+	if _, ok := stainlessOSToPlatform[r.Header.Get("X-Stainless-OS")]; !ok {
+		return false
+	}
+
+	// 4.3 验证 metadata.user_id（结构 + 字段级格式）
 	if body == nil {
 		return false
 	}
@@ -131,11 +239,190 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 		return false
 	}
 
-	if ParseMetadataUserID(userID) == nil {
+	parsed := ParseMetadataUserID(userID)
+	if !isStrictMetadataUserID(parsed) {
+		return false
+	}
+
+	// 4.4 校验 system 中 x-anthropic-billing-header 段的 cc_version 后三位。
+	// CLI v2.1.77+ 通过 SHA256(salt + first_user_text[4,7,20] + version)[:3] 派生
+	// 该后缀；伪造客户端要么完全省略 billing header，要么只能写出错误的 suffix。
+	// 仅对发出该 header 的 CLI 版本（>= 2.1.77）强制存在性 + 正确性。
+	if !v.validateBillingHeaderSuffix(r, body) {
+		return false
+	}
+
+	// 4.5 env block 存在则严格校验。
+	// system 中若出现 envBlockSentinel，则其 Platform/OS Version/Shell 三行
+	// 必须都解析得到非空值，Platform 必须是 CLI 已知值，且与 X-Stainless-OS
+	// 一致。compact / Agent SDK / explore agent 等模板可能不带 env block，
+	// 因此仅在存在时强制校验，避免误杀。
+	if !v.validateEnvBlock(r, body) {
 		return false
 	}
 
 	return true
+}
+
+// validateEnvBlock 校验 system 中含 envBlockSentinel 段的环境信息合法性。
+// 不存在 env block → 返回 true（兼容不带 env 的 CLI prompt 模板）。
+func (v *ClaudeCodeValidator) validateEnvBlock(r *http.Request, body map[string]any) bool {
+	envText, ok := findEnvBlockText(body)
+	if !ok {
+		return true
+	}
+
+	platform := extractEnvLineValue(envPlatformExtractRe, envText)
+	osVersion := extractEnvLineValue(envOSVersionExtractRe, envText)
+	shell := extractEnvLineValue(envShellExtractRe, envText)
+	if platform == "" || osVersion == "" || shell == "" {
+		return false
+	}
+	if _, ok := validClaudeCodePlatforms[platform]; !ok {
+		return false
+	}
+
+	// X-Stainless-OS 已在 4.2 校验为合法 key，可安全索引。
+	expectedPlatform := stainlessOSToPlatform[r.Header.Get("X-Stainless-OS")]
+	return expectedPlatform == platform
+}
+
+// findEnvBlockText 返回 body.system 中第一个含 envBlockSentinel 的 text 段。
+func findEnvBlockText(body map[string]any) (string, bool) {
+	if body == nil {
+		return "", false
+	}
+	systemEntries, ok := body["system"].([]any)
+	if !ok {
+		return "", false
+	}
+	for _, entry := range systemEntries {
+		entryMap, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		text, ok := entryMap["text"].(string)
+		if !ok {
+			continue
+		}
+		if strings.Contains(text, envBlockSentinel) {
+			return text, true
+		}
+	}
+	return "", false
+}
+
+// extractEnvLineValue 用提取型正则取出 `- Field: value` 行的 value（trim 空白）。
+// 未匹配时返回空串。
+func extractEnvLineValue(re *regexp.Regexp, text string) string {
+	m := re.FindStringSubmatch(text)
+	if len(m) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
+// validateBillingHeaderSuffix 校验请求 body system 中 x-anthropic-billing-header
+// 段的 cc_version 后三位 suffix。返回 false 表示伪造或被篡改。
+//
+//   - UA version < 2.1.77：兼容旧版本，跳过校验
+//   - billing header 段缺失（在 >= 2.1.77 下）：reject
+//   - cc_version=X.Y.Z.SSS 解析失败、X.Y.Z 与 UA 不一致、SSS 不匹配重算结果：reject
+func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body map[string]any) bool {
+	uaVersion := ExtractCLIVersion(r.Header.Get("User-Agent"))
+	if uaVersion == "" {
+		return false
+	}
+	// 老版本无 billing header，跳过该项校验
+	if CompareVersions(uaVersion, billingHeaderMinVersion) < 0 {
+		return true
+	}
+
+	billingText, ok := findBillingHeaderText(body)
+	if !ok {
+		return false
+	}
+
+	matches := ccVersionParseRe.FindStringSubmatch(billingText)
+	if matches == nil {
+		return false
+	}
+	parsedVersion, parsedSuffix := matches[1], matches[2]
+	if parsedVersion != uaVersion {
+		return false
+	}
+
+	expected := computeBillingHeaderSuffixFromText(extractFirstUserMessageTextFromMap(body), uaVersion)
+	return parsedSuffix == expected
+}
+
+// findBillingHeaderText 返回 body.system 中以 "x-anthropic-billing-header" 起首
+// 的 text 段，若不存在返回 ok=false。
+func findBillingHeaderText(body map[string]any) (string, bool) {
+	if body == nil {
+		return "", false
+	}
+	systemEntries, ok := body["system"].([]any)
+	if !ok {
+		return "", false
+	}
+	for _, entry := range systemEntries {
+		entryMap, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		text, ok := entryMap["text"].(string)
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(text, "x-anthropic-billing-header") {
+			return text, true
+		}
+	}
+	return "", false
+}
+
+// extractFirstUserMessageTextFromMap 是 extractFirstUserMessageText 的 map 版，
+// 用于 validator 直接消费已解析后的 body。语义保持一致：取第一条 role==user
+// 消息的最后一个 text 内容块。
+func extractFirstUserMessageTextFromMap(body map[string]any) string {
+	if body == nil {
+		return ""
+	}
+	msgs, ok := body["messages"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, m := range msgs {
+		msgMap, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msgMap["role"].(string); role != "user" {
+			continue
+		}
+		switch content := msgMap["content"].(type) {
+		case string:
+			return content
+		case []any:
+			var last string
+			for _, item := range content {
+				itemMap, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				if t, _ := itemMap["type"].(string); t != "text" {
+					continue
+				}
+				if text, ok := itemMap["text"].(string); ok {
+					last = text
+				}
+			}
+			return last
+		}
+		return ""
+	}
+	return ""
 }
 
 // hasClaudeCodeSystemPrompt 检查请求是否包含 Claude Code 系统提示词
