@@ -80,6 +80,13 @@ func claudeCodeBodyMapFromParsedRequest(parsedReq *service.ParsedRequest) map[st
 	if parsedReq.MetadataUserID != "" {
 		bodyMap["metadata"] = map[string]any{"user_id": parsedReq.MetadataUserID}
 	}
+	// Messages are required by validateBillingHeaderSuffix to recompute the
+	// cc_version suffix from the first user message text. Omitting them makes
+	// the validator compute against an empty string and falsely reject any
+	// real CLI request whose first user message would sample to non-"000".
+	if len(parsedReq.Messages) > 0 {
+		bodyMap["messages"] = parsedReq.Messages
+	}
 	return bodyMap
 }
 
