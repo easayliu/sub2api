@@ -124,6 +124,14 @@ const expectedXAppValue = "cli"
 // a non-CLI client, so we treat it as a strict equality check.
 const expectedStainlessLang = "js"
 
+// uaOfficialSDKPattern matches UA suffixes from official Anthropic SDK
+// clients that share the claude-cli/X.Y.Z prefix but legitimately omit
+// the claude.BetaClaudeCode anthropic-beta token. Currently covers the
+// Claude VSCode extension and agent-sdk wrappers — all other strict
+// fingerprint checks (X-App=cli, anthropic-version, X-Stainless-*,
+// metadata.user_id) still apply unchanged for these clients.
+var uaOfficialSDKPattern = regexp.MustCompile(`(?i)\b(?:claude-vscode|agent-sdk/\d+\.\d+\.\d+)\b`)
+
 // hasRequiredCLIBetaToken reports whether the comma-separated anthropic-beta
 // header carries the canonical CLI identifier token. Real Claude CLI traffic
 // (>= 2.1.x) always emits claude.BetaClaudeCode on /v1/messages outside of
@@ -131,7 +139,8 @@ const expectedStainlessLang = "js"
 // Clients that genuinely lack this token (e.g. SDK-mode CLI invocations) are
 // routed through the mimic-rewrite path, which normalises their body to CLI
 // wire format before forwarding upstream — the strict reject here is what
-// triggers that safety net.
+// triggers that safety net. Exception: clients matching uaOfficialSDKPattern
+// are accepted at the call site without this token (see Validate step 4.2).
 func hasRequiredCLIBetaToken(header string) bool {
 	if header == "" {
 		return false
@@ -263,8 +272,15 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	}
 
 	if !hasRequiredCLIBetaToken(r.Header.Get("anthropic-beta")) {
-		logRejectedWithShape(r, body, "4.2_anthropic_beta", "missing_claude_code_token", "anthropic_beta", r.Header.Get("anthropic-beta"))
-		return false
+		// Official Anthropic SDK clients (Claude VSCode extension, agent-sdk)
+		// share the claude-cli UA prefix but drop claude-code-20250219 from
+		// anthropic-beta. Their bodies are already in valid official wire
+		// format, so routing them through mimic would corrupt the request.
+		// Accept missing token only when the UA marks them as official SDK.
+		if !uaOfficialSDKPattern.MatchString(ua) {
+			logRejectedWithShape(r, body, "4.2_anthropic_beta", "missing_claude_code_token", "anthropic_beta", r.Header.Get("anthropic-beta"))
+			return false
+		}
 	}
 
 	if !strings.EqualFold(r.Header.Get("anthropic-dangerous-direct-browser-access"), "true") {
