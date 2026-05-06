@@ -6194,10 +6194,17 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			if !enableMPT {
 				accountUUID := account.GetExtraString("account_uuid")
 				if accountUUID != "" && fp.ClientID != "" {
-					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
+					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent, fp); err == nil && len(newBody) > 0 {
 						body = newBody
 					}
 				}
+			}
+
+			// 3. Normalize the Claude Code system-prompt env block (Platform /
+			// OS Version / Shell). Gated on fingerprint unification so it stays
+			// in sync with X-Stainless-OS/Arch rewrites.
+			if enableFP {
+				body = s.identityService.RewriteEnvSection(body, fp)
 			}
 		}
 	}
@@ -6250,10 +6257,15 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// OAuth账号：应用缓存的指纹到请求头（覆盖白名单透传的头）。
-	// 真 Claude Code CLI 直接透传：客户端已发出规范头，原样上行；
+	// 真 Claude Code CLI 直接透传：客户端已发出规范头，不用缓存指纹覆盖；
 	// 仅 mimic 客户端或非 OAuth 路径需要应用指纹。
 	if fingerprint != nil && (mimicClaudeCode || tokenType != "oauth") {
 		s.identityService.ApplyFingerprint(req, fingerprint)
+	} else if fingerprint != nil && enableFP {
+		// Real Claude Code CLI passthrough path: keep UA / cc_version verbatim
+		// but still overwrite X-Stainless-OS/Arch so they match the locked Mac
+		// profile used in the rewritten system-prompt env block.
+		s.identityService.ApplyOSFingerprint(req, fingerprint)
 	}
 
 	// 确保必要的headers存在（保持原始大小写）
@@ -9197,7 +9209,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 			if !ctEnableMPT {
 				accountUUID := account.GetExtraString("account_uuid")
 				if accountUUID != "" && fp.ClientID != "" {
-					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
+					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent, fp); err == nil && len(newBody) > 0 {
 						body = newBody
 					}
 				}

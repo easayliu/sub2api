@@ -624,7 +624,9 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 	req.Header.Set("Version", openAICodexProbeVersion)
 	req.Header.Set("User-Agent", codexCLIUserAgent)
 	if s.identityCache != nil {
-		if fp, fpErr := s.identityCache.GetFingerprint(reqCtx, account.ID); fpErr == nil && fp != nil && strings.TrimSpace(fp.UserAgent) != "" {
+		// Probe requests don't carry a real client platform; pin to the MacOS
+		// bucket so we get a plausible UA without disturbing other buckets.
+		if fp, fpErr := s.identityCache.GetFingerprint(reqCtx, account.ID, PlatformMacOS); fpErr == nil && fp != nil && strings.TrimSpace(fp.UserAgent) != "" {
 			req.Header.Set("User-Agent", strings.TrimSpace(fp.UserAgent))
 		}
 	}
@@ -1166,8 +1168,10 @@ func (s *AccountUsageService) fetchOAuthUsageRaw(ctx context.Context, account *A
 	}
 
 	// 尝试获取缓存的 Fingerprint（包含 User-Agent 等信息）
+	// Out-of-band Claude usage probe; no client headers available, so pull
+	// from the MacOS bucket as a stable default.
 	if s.identityCache != nil {
-		if fp, err := s.identityCache.GetFingerprint(ctx, account.ID); err == nil && fp != nil {
+		if fp, err := s.identityCache.GetFingerprint(ctx, account.ID, PlatformMacOS); err == nil && fp != nil {
 			opts.Fingerprint = fp
 		}
 	}

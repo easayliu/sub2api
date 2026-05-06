@@ -12,16 +12,16 @@ type identityCacheStub struct {
 	maskedSessionID string
 }
 
-func (s *identityCacheStub) GetFingerprint(_ context.Context, _ int64) (*Fingerprint, error) {
+func (s *identityCacheStub) GetFingerprint(_ context.Context, _ int64, _ string) (*Fingerprint, error) {
 	return nil, nil
 }
-func (s *identityCacheStub) SetFingerprint(_ context.Context, _ int64, _ *Fingerprint) error {
+func (s *identityCacheStub) SetFingerprint(_ context.Context, _ int64, _ string, _ *Fingerprint) error {
 	return nil
 }
-func (s *identityCacheStub) GetMaskedSessionID(_ context.Context, _ int64) (string, error) {
+func (s *identityCacheStub) GetMaskedSessionID(_ context.Context, _ int64, _ string) (string, error) {
 	return s.maskedSessionID, nil
 }
-func (s *identityCacheStub) SetMaskedSessionID(_ context.Context, _ int64, sessionID string) error {
+func (s *identityCacheStub) SetMaskedSessionID(_ context.Context, _ int64, _, sessionID string) error {
 	s.maskedSessionID = sessionID
 	return nil
 }
@@ -68,7 +68,7 @@ func TestIdentityService_RewriteUserIDWithMasking_PreservesTopLevelFieldOrder(t 
 		},
 	}
 
-	result, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc-uuid", "client-xyz", "claude-cli/2.1.78 (external, cli)")
+	result, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc-uuid", "client-xyz", "claude-cli/2.1.78 (external, cli)", nil)
 	require.NoError(t, err)
 	resultStr := string(result)
 
