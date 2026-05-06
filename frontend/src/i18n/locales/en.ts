@@ -4374,7 +4374,7 @@ export default {
         title: 'Request Forwarding',
         description: 'Control how requests are forwarded to upstream OAuth accounts',
         fingerprintUnification: 'Fingerprint Unification',
-        fingerprintUnificationHint: 'Unify X-Stainless-* headers across users sharing the same OAuth account. Disabling passes through each client\'s original headers.',
+        fingerprintUnificationHint: 'Lock all client traffic on a shared OAuth account to a single account-bound identity (currently Mac by default): unifies X-Stainless-* headers, the system-prompt environment block (Platform / OS Version / Shell / working directory), and device_id. When disabled, original client identifiers pass through verbatim, exposing cross-platform jumps on a single account that significantly raise the ban risk — not recommended to keep off.',
         metadataPassthrough: 'Metadata Passthrough',
         metadataPassthroughHint: 'Pass through client\'s original metadata.user_id without rewriting. May improve upstream cache hit rates.',
         cchSigning: 'CCH Signing',

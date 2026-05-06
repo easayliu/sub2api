@@ -6335,32 +6335,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			}
 			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
 		} else {
-			// Claude Code 客户端（非 mimic）：透传原始 header，补齐 oauth +
-			// advanced-tool-use / effort 等 CLI 2.1.123 必发 token。
-			// 客户端经反代到达时可能丢失部分 beta token，按真实 CLI wire
-			// 顺序合并补齐，避免上游指纹差异。
+			// Real Claude Code CLI passthrough: keep client wire intact.
+			// Only ensure oauth-2025-04-20 is present (required for OAuth scope
+			// recognition); injecting any other tokens produces combinations
+			// that no genuine CLI version emits, which is itself a fingerprint.
 			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
-			requiredBetas := []string{
-				claude.BetaOAuth,
-				claude.BetaInterleavedThinking,
-				claude.BetaRedactThinking,
-				claude.BetaContextManagement,
-				claude.BetaPromptCachingScope,
-			}
-			if !strings.Contains(strings.ToLower(modelID), "haiku") {
-				requiredBetas = []string{
-					claude.BetaClaudeCode,
-					claude.BetaOAuth,
-					claude.BetaContext1M,
-					claude.BetaInterleavedThinking,
-					claude.BetaRedactThinking,
-					claude.BetaContextManagement,
-					claude.BetaPromptCachingScope,
-					claude.BetaAdvancedToolUse,
-					claude.BetaEffort,
-				}
-			}
-			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, clientBetaHeader, effectiveDropSet))
+			clientBetaHeader = ensureOAuthBeta(clientBetaHeader)
+			setHeaderRaw(req.Header, "anthropic-beta", stripBetaTokensWithSet(clientBetaHeader, effectiveDropSet))
 		}
 	} else {
 		// API-key accounts: apply beta policy filter to strip controlled tokens
@@ -6423,47 +6404,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 // getBetaHeader 处理anthropic-beta header
 // 对于OAuth账号，需要确保包含oauth-2025-04-20
 func (s *GatewayService) getBetaHeader(modelID string, clientBetaHeader string) string {
-	// 如果客户端传了anthropic-beta
 	if clientBetaHeader != "" {
-		// 已包含oauth beta则直接返回
-		if strings.Contains(clientBetaHeader, claude.BetaOAuth) {
-			return clientBetaHeader
-		}
-
-		// 需要添加oauth beta
-		parts := strings.Split(clientBetaHeader, ",")
-		for i, p := range parts {
-			parts[i] = strings.TrimSpace(p)
-		}
-
-		// 在claude-code-20250219后面插入oauth beta
-		claudeCodeIdx := -1
-		for i, p := range parts {
-			if p == claude.BetaClaudeCode {
-				claudeCodeIdx = i
-				break
-			}
-		}
-
-		if claudeCodeIdx >= 0 {
-			// 在claude-code后面插入
-			newParts := make([]string, 0, len(parts)+1)
-			newParts = append(newParts, parts[:claudeCodeIdx+1]...)
-			newParts = append(newParts, claude.BetaOAuth)
-			newParts = append(newParts, parts[claudeCodeIdx+1:]...)
-			return strings.Join(newParts, ",")
-		}
-
-		// 没有claude-code，放在第一位
-		return claude.BetaOAuth + "," + clientBetaHeader
+		return ensureOAuthBeta(clientBetaHeader)
 	}
-
-	// 客户端没传，根据模型生成
-	// haiku 模型不需要 claude-code beta
+	// Client sent nothing; pick a model-appropriate default.
 	if strings.Contains(strings.ToLower(modelID), "haiku") {
 		return claude.HaikuBetaHeader
 	}
-
 	return claude.DefaultBetaHeader
 }
 
@@ -6526,6 +6473,32 @@ func mergeAnthropicBeta(required []string, incoming string) string {
 	for _, p := range strings.Split(incoming, ",") {
 		add(p)
 	}
+	return strings.Join(out, ",")
+}
+
+// ensureOAuthBeta inserts the OAuth beta token into a comma-separated
+// anthropic-beta header when missing. Placement matches real CLI 2.1.123+
+// wire order: right after the claude-code-* token when present, otherwise
+// at the front. Returns the input unchanged when the token is already there.
+func ensureOAuthBeta(header string) string {
+	if header == "" {
+		return claude.BetaOAuth
+	}
+	parts := strings.Split(header, ",")
+	insertAt := 0
+	for i, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == claude.BetaOAuth {
+			return header
+		}
+		if strings.HasPrefix(trimmed, "claude-code-") {
+			insertAt = i + 1
+		}
+	}
+	out := make([]string, 0, len(parts)+1)
+	out = append(out, parts[:insertAt]...)
+	out = append(out, claude.BetaOAuth)
+	out = append(out, parts[insertAt:]...)
 	return strings.Join(out, ",")
 }
 

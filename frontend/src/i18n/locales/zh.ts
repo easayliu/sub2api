@@ -4536,7 +4536,7 @@ export default {
         title: '请求转发行为',
         description: '控制请求转发到上游 OAuth 账号时的行为',
         fingerprintUnification: '指纹统一化',
-        fingerprintUnificationHint: '统一共享同一 OAuth 账号的用户的 X-Stainless-* 请求头。关闭后透传客户端原始请求头。',
+        fingerprintUnificationHint: '将同一 OAuth 账号的所有客户端流量锁定为账号绑定的固定身份（当前默认 Mac）：统一 X-Stainless-* 请求头、system 提示的环境块（Platform / OS Version / Shell / 工作目录）以及 device_id。关闭后客户端原始信息直接透传到上游，会让 Anthropic 看到同一账号跨平台跳跃，封号风险显著上升，不建议长期关闭。',
         metadataPassthrough: 'Metadata 透传',
         metadataPassthroughHint: '透传客户端原始 metadata.user_id，不进行重写。可能提高上游缓存命中率。',
         cchSigning: 'CCH 签名',

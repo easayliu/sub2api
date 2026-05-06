@@ -119,24 +119,15 @@ func platformProfile(platform string) Fingerprint {
 // prefer platformProfile(platform) for explicit bucketing.
 var defaultFingerprint = platformProfiles[PlatformMacOS]
 
-// detectPlatform normalizes the incoming X-Stainless-OS header into one of the
-// known platform buckets. Missing or unknown values fall back to MacOS so
-// mimic clients (which often omit the header) keep their existing routing.
-func detectPlatform(headers http.Header) string {
-	v := strings.TrimSpace(headers.Get("X-Stainless-OS"))
-	if v == "" {
-		return PlatformMacOS
-	}
-	switch strings.ToLower(v) {
-	case "macos", "darwin":
-		return PlatformMacOS
-	case "windows", "win32", "win":
-		return PlatformWindows
-	case "linux":
-		return PlatformLinux
-	default:
-		return PlatformMacOS
-	}
+// pinnedPlatform returns the platform bucket every account is locked to.
+// All accounts deliberately share a single Mac identity so the upstream view
+// of one account never jumps platforms — cross-platform drift on a single
+// OAuth token is a stronger anti-detection signal than the occasional
+// Windows/Linux marker that leaks through (working dir paths are normalized
+// to Mac elsewhere). To re-enable per-client bucketing, replace callers of
+// this with a header- or account-driven platform decision.
+func pinnedPlatform() string {
+	return PlatformMacOS
 }
 
 // Fingerprint represents account fingerprint data
@@ -184,11 +175,11 @@ func NewIdentityService(cache IdentityCache) *IdentityService {
 	return &IdentityService{cache: cache}
 }
 
-// GetOrCreateFingerprint 获取或创建账号在当前平台 bucket 下的指纹。
-// 平台从 X-Stainless-OS 推断（默认 MacOS），每个 (account, platform) bucket
-// 持有独立的 device_id 和 canonical profile。
+// GetOrCreateFingerprint 获取或创建账号的固定指纹。
+// 每个账号锁定到单一 platform bucket（当前为 Mac），保证 Anthropic 视角下
+// 同一上游账号的 OS / Arch / env 永远一致；客户端实际平台不会污染身份。
 func (s *IdentityService) GetOrCreateFingerprint(ctx context.Context, accountID int64, headers http.Header) (*Fingerprint, error) {
-	platform := detectPlatform(headers)
+	platform := pinnedPlatform()
 
 	// 尝试从缓存获取指纹
 	cached, err := s.cache.GetFingerprint(ctx, accountID, platform)

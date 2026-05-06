@@ -2,7 +2,6 @@ package service
 
 import (
 	"encoding/json"
-	"net/http"
 	"strings"
 	"testing"
 
@@ -269,55 +268,6 @@ func TestApplyLockedProfile_WindowsBucketLocksToWindowsProfile(t *testing.T) {
 	require.False(t, applyLockedProfile(fp, PlatformWindows))
 }
 
-func TestDetectPlatform_HeaderNormalization(t *testing.T) {
-	cases := []struct {
-		name string
-		hdr  string
-		want string
-	}{
-		{"missing header", "", PlatformMacOS},
-		{"macos verbatim", "MacOS", PlatformMacOS},
-		{"darwin alias", "darwin", PlatformMacOS},
-		{"windows verbatim", "Windows", PlatformWindows},
-		{"win32 alias", "win32", PlatformWindows},
-		{"linux", "Linux", PlatformLinux},
-		{"linux lowercase", "linux", PlatformLinux},
-		{"unknown falls back to mac", "FreeBSD", PlatformMacOS},
-		{"whitespace trimmed", "  Windows  ", PlatformWindows},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := http.Header{}
-			if tc.hdr != "" {
-				h.Set("X-Stainless-OS", tc.hdr)
-			}
-			require.Equal(t, tc.want, detectPlatform(h))
-		})
-	}
-}
-
-// Windows-bucket env block must pass through verbatim — the rewriter's
-// targeted at the platform the bucket was created for, so a Windows env
-// block + Windows fingerprint stays internally consistent without rewriting
-// C:\ paths or the PowerShell shell line.
-func TestRewriteEnvSection_WindowsBucketLeavesEnvUntouched(t *testing.T) {
-	winFP := platformProfiles[PlatformWindows]
-	svc := newEnvRewriteService()
-	envText := strings.Join([]string{
-		"You have been invoked in the following environment: ",
-		" - Primary working directory: C:\\Users\\easayliu",
-		" - Platform: win32",
-		" - Shell: PowerShell (use PowerShell syntax — e.g., $null not /dev/null, $env:VAR not $VAR, backtick for line continuation)",
-		" - OS Version: Windows 11 Enterprise 10.0.26200",
-	}, "\n")
-
-	body := buildEnvBody(t, envText)
-	out := svc.RewriteEnvSection(body, &winFP)
-
-	got := gjson.GetBytes(out, "system.1.text").String()
-	// Working directory + Windows shell description must survive verbatim.
-	require.Contains(t, got, " - Primary working directory: C:\\Users\\easayliu")
-	require.Contains(t, got, " - Platform: win32")
-	require.Contains(t, got, " - OS Version: Windows 11 Enterprise 10.0.26200")
-	require.Contains(t, got, "PowerShell")
-}
+// All accounts pin to the Mac platform; no detectPlatform / Windows-bucket
+// passthrough behavior exists anymore. Tests for those removed paths used
+// to live here.
