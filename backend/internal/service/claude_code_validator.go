@@ -124,13 +124,17 @@ const expectedXAppValue = "cli"
 // a non-CLI client, so we treat it as a strict equality check.
 const expectedStainlessLang = "js"
 
-// uaOfficialSDKPattern matches UA suffixes from official Anthropic SDK
-// clients that share the claude-cli/X.Y.Z prefix but legitimately omit
-// the claude.BetaClaudeCode anthropic-beta token. Currently covers the
-// Claude VSCode extension and agent-sdk wrappers — all other strict
-// fingerprint checks (X-App=cli, anthropic-version, X-Stainless-*,
-// metadata.user_id) still apply unchanged for these clients.
-var uaOfficialSDKPattern = regexp.MustCompile(`(?i)\b(?:claude-vscode|agent-sdk/\d+\.\d+\.\d+)\b`)
+// uaOfficialSDKPattern matches UA suffixes from official Anthropic clients
+// that share the claude-cli/X.Y.Z prefix but legitimately omit the
+// claude.BetaClaudeCode anthropic-beta token. Covers:
+//   - "(external, cli)" — newer terminal CLI builds that no longer emit
+//     claude-code-20250219 in anthropic-beta
+//   - "claude-vscode" — Claude Code VSCode extension
+//   - "agent-sdk/X.Y.Z" — Anthropic agent-sdk wrappers
+//
+// All other strict fingerprint checks (X-App=cli, anthropic-version,
+// X-Stainless-*, metadata.user_id) still apply unchanged for these clients.
+var uaOfficialSDKPattern = regexp.MustCompile(`(?i)(?:\bclaude-vscode\b|\bagent-sdk/\d+\.\d+\.\d+\b|\(external,\s*cli\))`)
 
 // hasRequiredCLIBetaToken reports whether the comma-separated anthropic-beta
 // header carries the canonical CLI identifier token. Real Claude CLI traffic
@@ -272,11 +276,12 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	}
 
 	if !hasRequiredCLIBetaToken(r.Header.Get("anthropic-beta")) {
-		// Official Anthropic SDK clients (Claude VSCode extension, agent-sdk)
-		// share the claude-cli UA prefix but drop claude-code-20250219 from
-		// anthropic-beta. Their bodies are already in valid official wire
-		// format, so routing them through mimic would corrupt the request.
-		// Accept missing token only when the UA marks them as official SDK.
+		// Official Anthropic clients ((external, cli) terminal builds, Claude
+		// VSCode extension, agent-sdk wrappers) share the claude-cli UA prefix
+		// but drop claude-code-20250219 from anthropic-beta. Their bodies are
+		// already in valid official wire format, so routing them through mimic
+		// would corrupt the request. Accept missing token only when the UA
+		// marks the request as one of these official families.
 		if !uaOfficialSDKPattern.MatchString(ua) {
 			logRejectedWithShape(r, body, "4.2_anthropic_beta", "missing_claude_code_token", "anthropic_beta", r.Header.Get("anthropic-beta"))
 			return false
