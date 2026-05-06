@@ -130,11 +130,17 @@ const expectedStainlessLang = "js"
 //   - "(external, cli)" — newer terminal CLI builds that no longer emit
 //     claude-code-20250219 in anthropic-beta
 //   - "claude-vscode" — Claude Code VSCode extension
-//   - "agent-sdk/X.Y.Z" — Anthropic agent-sdk wrappers
+//
+// agent-sdk/X.Y.Z is intentionally NOT included: it identifies the
+// @anthropic-ai/claude-agent-sdk package, which any third-party app can
+// embed. Letting bare agent-sdk traffic through would open a generic
+// bypass for non-Claude-Code clients. The known VSCode case carries both
+// "claude-vscode" and "agent-sdk/X.Y.Z" tokens, so the claude-vscode
+// alternate above is sufficient to recognise it.
 //
 // All other strict fingerprint checks (X-App=cli, anthropic-version,
 // X-Stainless-*, metadata.user_id) still apply unchanged for these clients.
-var uaOfficialSDKPattern = regexp.MustCompile(`(?i)(?:\bclaude-vscode\b|\bagent-sdk/\d+\.\d+\.\d+\b|\(external,\s*cli\))`)
+var uaOfficialSDKPattern = regexp.MustCompile(`(?i)(?:\bclaude-vscode\b|\(external,\s*cli\))`)
 
 // hasRequiredCLIBetaToken reports whether the comma-separated anthropic-beta
 // header carries the canonical CLI identifier token. Real Claude CLI traffic
