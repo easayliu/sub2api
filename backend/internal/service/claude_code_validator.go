@@ -29,6 +29,21 @@ func logRejected(r *http.Request, step, reason string, extras ...any) {
 	slog.Warn("claude_code_validator_reject", attrs...)
 }
 
+// logSoftCheck emits a warning when a soft check fails. Unlike logRejected,
+// the caller continues validation rather than rejecting. Used for fingerprint
+// hints that newer CLI builds (e.g. external SDK invocations) may legitimately
+// drop, so we keep visibility without bouncing real traffic.
+func logSoftCheck(r *http.Request, step, reason string, extras ...any) {
+	attrs := []any{
+		"step", step,
+		"reason", reason,
+		"ua", r.Header.Get("User-Agent"),
+		"path", r.URL.Path,
+	}
+	attrs = append(attrs, extras...)
+	slog.Warn("claude_code_validator_soft_warn", attrs...)
+}
+
 // ClaudeCodeValidator 验证请求是否来自 Claude Code 客户端
 // 完全学习自 claude-relay-service 项目的验证逻辑
 type ClaudeCodeValidator struct{}
@@ -97,9 +112,10 @@ const expectedXAppValue = "cli"
 const expectedStainlessLang = "js"
 
 // hasRequiredCLIBetaToken reports whether the comma-separated anthropic-beta
-// header carries the canonical CLI identifier token. Real Claude CLI traffic
-// (>= 2.1.x) always emits claude.BetaClaudeCode on /v1/messages outside of
-// haiku probes, so requiring it raises the cost of forging the header.
+// header carries the canonical CLI identifier token. Most Claude CLI traffic
+// emits claude.BetaClaudeCode on /v1/messages, but newer external/SDK-mode
+// invocations (UA suffix "(external, cli)") have been observed to omit it,
+// so callers should treat absence as a soft hint rather than a hard reject.
 func hasRequiredCLIBetaToken(header string) bool {
 	if header == "" {
 		return false
@@ -208,7 +224,7 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	// 4.2 严格校验必需的 headers，对齐真实 CLI 抓包指纹
 	//   - X-App 必须等于官方 CLI 发出的 "cli"（大小写不敏感以兼容代理改写）
 	//   - anthropic-version 必须等于官方稳定版本 "2023-06-01"
-	//   - anthropic-beta 必须包含 CLI 标识 token claude-code-20250219
+	//   - anthropic-beta 软检查 CLI 标识 token claude-code-20250219（缺失只告警）
 	//   - anthropic-dangerous-direct-browser-access 必须等于 "true"（CLI 硬编码）
 	//   - X-Stainless-Lang 必须等于 "js"（Node SDK 固定值）
 	//   - X-Stainless-Package-Version 必须存在（值随版本变化故只校验非空）
@@ -224,8 +240,9 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	}
 
 	if !hasRequiredCLIBetaToken(r.Header.Get("anthropic-beta")) {
-		logRejected(r, "4.2_anthropic_beta", "missing_claude_code_token", "anthropic_beta", r.Header.Get("anthropic-beta"))
-		return false
+		// Soft check: newer external/SDK-mode CLI builds drop this token.
+		// Log for visibility but continue validation.
+		logSoftCheck(r, "4.2_anthropic_beta", "missing_claude_code_token", "anthropic_beta", r.Header.Get("anthropic-beta"))
 	}
 
 	if !strings.EqualFold(r.Header.Get("anthropic-dangerous-direct-browser-access"), "true") {
