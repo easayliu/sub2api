@@ -102,48 +102,6 @@ func TestValidate_MessagesPath_FullValid(t *testing.T) {
 	require.True(t, result, "完整有效请求应通过")
 }
 
-// TestValidate_MessagesPath_AnthropicBetaSoftCheck 锁定软检查行为：
-// anthropic-beta 缺失 / 不含 claude-code-20250219 / 全空，均不应拒绝请求。
-// 仅记录 soft warning，因为新的 external/SDK-mode CLI 调用会丢掉该 token。
-func TestValidate_MessagesPath_AnthropicBetaSoftCheck(t *testing.T) {
-	v := newTestValidator()
-
-	tests := []struct {
-		name   string
-		mutate func(req *http.Request)
-	}{
-		{
-			name: "anthropic-beta 不含 claude-code-20250219",
-			mutate: func(req *http.Request) {
-				req.Header.Set("anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14")
-			},
-		},
-		{
-			name: "anthropic-beta 仅空白与逗号",
-			mutate: func(req *http.Request) {
-				req.Header.Set("anthropic-beta", " , , ")
-			},
-		},
-		{
-			name: "anthropic-beta 缺失",
-			mutate: func(req *http.Request) {
-				req.Header.Del("anthropic-beta")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("POST", "/v1/messages", nil)
-			setValidCLIHeaders(req)
-			tt.mutate(req)
-
-			require.True(t, v.Validate(req, validClaudeCodeBody()),
-				"soft check 失败时应仅告警不拒绝")
-		})
-	}
-}
-
 // TestValidate_MessagesPath_StrictHeaderRejection 覆盖严格化的所有 header 拒绝路径。
 func TestValidate_MessagesPath_StrictHeaderRejection(t *testing.T) {
 	v := newTestValidator()
@@ -166,6 +124,20 @@ func TestValidate_MessagesPath_StrictHeaderRejection(t *testing.T) {
 				req.Header.Set("anthropic-version", "2024-01-01")
 			},
 			description: "anthropic-version 必须严格匹配官方稳定版本",
+		},
+		{
+			name: "anthropic-beta 不含 claude-code-20250219",
+			mutate: func(req *http.Request) {
+				req.Header.Set("anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14")
+			},
+			description: "anthropic-beta 必须包含 CLI 标识 token",
+		},
+		{
+			name: "anthropic-beta 仅空白与逗号",
+			mutate: func(req *http.Request) {
+				req.Header.Set("anthropic-beta", " , , ")
+			},
+			description: "空 token 集应被拒",
 		},
 		{
 			name: "anthropic-dangerous-direct-browser-access 缺失",
@@ -498,6 +470,7 @@ func TestValidate_MessagesPath_MissingHeaders(t *testing.T) {
 		missingHeader string
 	}{
 		{"缺少 X-App", "X-App"},
+		{"缺少 anthropic-beta", "anthropic-beta"},
 		{"缺少 anthropic-version", "anthropic-version"},
 		{"缺少 anthropic-dangerous-direct-browser-access", "anthropic-dangerous-direct-browser-access"},
 		{"缺少 X-Stainless-Lang", "X-Stainless-Lang"},

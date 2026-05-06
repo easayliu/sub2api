@@ -118,6 +118,144 @@ func TestFirstSystemTextPreview(t *testing.T) {
 	})
 }
 
+// shapeMap turns the buildRejectShape return slice into a map for easier
+// per-key assertions in tests.
+func shapeMap(t *testing.T, kv []any) map[string]any {
+	t.Helper()
+	require.Equal(t, 0, len(kv)%2, "shape kv list must have even length")
+	out := make(map[string]any, len(kv)/2)
+	for i := 0; i < len(kv); i += 2 {
+		key, ok := kv[i].(string)
+		require.True(t, ok, "shape key at index %d is not string", i)
+		out[key] = kv[i+1]
+	}
+	return out
+}
+
+func TestBuildRejectShape(t *testing.T) {
+	t.Run("nil request", func(t *testing.T) {
+		require.Nil(t, buildRejectShape(nil, nil))
+	})
+
+	t.Run("empty request, nil body → all defaults", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		shape := shapeMap(t, buildRejectShape(req, nil))
+
+		require.Equal(t, "", shape["shape_ua_version"])
+		require.Equal(t, false, shape["shape_ua_external"])
+		require.Equal(t, "", shape["shape_x_app"])
+		require.Equal(t, "", shape["shape_anthropic_version"])
+		require.Equal(t, 0, shape["shape_beta_tokens"])
+		require.Equal(t, false, shape["shape_has_cc_beta_token"])
+		require.Equal(t, false, shape["shape_has_dangerous_direct_browser"])
+		require.Equal(t, "", shape["shape_x_stainless_lang"])
+		require.Equal(t, "", shape["shape_x_stainless_os"])
+		require.Equal(t, false, shape["shape_x_stainless_pkg_present"])
+		require.Equal(t, systemKindMissing, shape["shape_system_kind"])
+		require.Equal(t, 0, shape["shape_system_segments"])
+		require.Equal(t, false, shape["shape_has_billing_header"])
+		require.Equal(t, false, shape["shape_has_env_block"])
+		require.Equal(t, metadataKindMissing, shape["shape_metadata_kind"])
+		require.Equal(t, false, shape["shape_has_metadata_user_id"])
+		require.Equal(t, metadataUserIDMissing, shape["shape_metadata_user_id_format"])
+	})
+
+	t.Run("real CLI request → all positives", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("User-Agent", "claude-cli/2.1.123 (external, cli)")
+		req.Header.Set("X-App", "cli")
+		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
+		req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+		req.Header.Set("X-Stainless-Lang", "js")
+		req.Header.Set("X-Stainless-OS", "MacOS")
+		req.Header.Set("X-Stainless-Package-Version", "0.81.0")
+
+		body := map[string]any{
+			"system": []any{
+				map[string]any{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.123.d8c;"},
+				map[string]any{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+				map[string]any{"type": "text", "text": "You have been invoked in the following environment:\n- Platform: darwin\n- OS Version: Darwin 25.0\n- Shell: zsh"},
+			},
+			"metadata": map[string]any{
+				"user_id": `{"device_id":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","account_uuid":"","session_id":"12345678-1234-1234-1234-123456789abc"}`,
+			},
+		}
+
+		shape := shapeMap(t, buildRejectShape(req, body))
+
+		require.Equal(t, "2.1.123", shape["shape_ua_version"])
+		require.Equal(t, true, shape["shape_ua_external"])
+		require.Equal(t, "cli", shape["shape_x_app"])
+		require.Equal(t, "2023-06-01", shape["shape_anthropic_version"])
+		require.Equal(t, 3, shape["shape_beta_tokens"])
+		require.Equal(t, true, shape["shape_has_cc_beta_token"])
+		require.Equal(t, true, shape["shape_has_dangerous_direct_browser"])
+		require.Equal(t, "js", shape["shape_x_stainless_lang"])
+		require.Equal(t, "MacOS", shape["shape_x_stainless_os"])
+		require.Equal(t, true, shape["shape_x_stainless_pkg_present"])
+		require.Equal(t, systemKindArray, shape["shape_system_kind"])
+		require.Equal(t, 3, shape["shape_system_segments"])
+		require.Equal(t, true, shape["shape_has_billing_header"])
+		require.Equal(t, true, shape["shape_has_env_block"])
+		require.Equal(t, metadataKindPresent, shape["shape_metadata_kind"])
+		require.Equal(t, true, shape["shape_has_metadata_user_id"])
+		require.Equal(t, metadataUserIDJSON, shape["shape_metadata_user_id_format"])
+	})
+
+	t.Run("legacy metadata format detected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		body := map[string]any{
+			"metadata": map[string]any{
+				"user_id": "user_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2_account__session_12345678-1234-1234-1234-123456789abc",
+			},
+		}
+		shape := shapeMap(t, buildRejectShape(req, body))
+		require.Equal(t, metadataUserIDLegacy, shape["shape_metadata_user_id_format"])
+	})
+
+	t.Run("invalid metadata format detected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		body := map[string]any{
+			"metadata": map[string]any{"user_id": "garbage"},
+		}
+		shape := shapeMap(t, buildRejectShape(req, body))
+		require.Equal(t, metadataUserIDInvalid, shape["shape_metadata_user_id_format"])
+	})
+
+	t.Run("metadata wrong type", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		body := map[string]any{"metadata": "not-a-map"}
+		shape := shapeMap(t, buildRejectShape(req, body))
+		require.Equal(t, metadataKindWrongType, shape["shape_metadata_kind"])
+		require.Equal(t, false, shape["shape_has_metadata_user_id"])
+	})
+
+	t.Run("ua external suffix detection (case insensitive, whitespace)", func(t *testing.T) {
+		cases := map[string]bool{
+			"claude-cli/2.1.92 (external, cli)":  true,
+			"claude-cli/2.1.92 (external,cli)":   true,
+			"Claude-CLI/2.1.92 (External, CLI)":  true,
+			"claude-cli/2.1.92":                  false,
+			"claude-cli/2.1.92 (darwin; arm64)":  false,
+			"":                                   false,
+		}
+		for ua, want := range cases {
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			req.Header.Set("User-Agent", ua)
+			shape := shapeMap(t, buildRejectShape(req, nil))
+			require.Equal(t, want, shape["shape_ua_external"], "UA: %q", ua)
+		}
+	})
+
+	t.Run("beta token count handles whitespace and empties", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("anthropic-beta", " a , ,b,, c ")
+		shape := shapeMap(t, buildRejectShape(req, nil))
+		require.Equal(t, 3, shape["shape_beta_tokens"])
+	})
+}
+
 func TestClaudeCodeValidator_ProbeBypass(t *testing.T) {
 	validator := NewClaudeCodeValidator()
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)

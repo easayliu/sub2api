@@ -29,19 +29,15 @@ func logRejected(r *http.Request, step, reason string, extras ...any) {
 	slog.Warn("claude_code_validator_reject", attrs...)
 }
 
-// logSoftCheck emits a warning when a soft check fails. Unlike logRejected,
-// the caller continues validation rather than rejecting. Used for fingerprint
-// hints that newer CLI builds (e.g. external SDK invocations) may legitimately
-// drop, so we keep visibility without bouncing real traffic.
-func logSoftCheck(r *http.Request, step, reason string, extras ...any) {
-	attrs := []any{
-		"step", step,
-		"reason", reason,
-		"ua", r.Header.Get("User-Agent"),
-		"path", r.URL.Path,
-	}
-	attrs = append(attrs, extras...)
-	slog.Warn("claude_code_validator_soft_warn", attrs...)
+// logRejectedWithShape is logRejected plus a structured fingerprint snapshot
+// of the rejected request, built by buildRejectShape. Used by the 4.x reject
+// sites so every reject log records the full request shape (header presence,
+// system kind, metadata format, etc.), not just the first failed indicator.
+// This lets us aggregate "what do rejected clients actually look like"
+// without enabling a body dump.
+func logRejectedWithShape(r *http.Request, body map[string]any, step, reason string, extras ...any) {
+	combined := append(extras, buildRejectShape(r, body)...)
+	logRejected(r, step, reason, combined...)
 }
 
 // ClaudeCodeValidator 验证请求是否来自 Claude Code 客户端
@@ -112,10 +108,13 @@ const expectedXAppValue = "cli"
 const expectedStainlessLang = "js"
 
 // hasRequiredCLIBetaToken reports whether the comma-separated anthropic-beta
-// header carries the canonical CLI identifier token. Most Claude CLI traffic
-// emits claude.BetaClaudeCode on /v1/messages, but newer external/SDK-mode
-// invocations (UA suffix "(external, cli)") have been observed to omit it,
-// so callers should treat absence as a soft hint rather than a hard reject.
+// header carries the canonical CLI identifier token. Real Claude CLI traffic
+// (>= 2.1.x) always emits claude.BetaClaudeCode on /v1/messages outside of
+// haiku probes, so requiring it raises the cost of forging the header.
+// Clients that genuinely lack this token (e.g. SDK-mode CLI invocations) are
+// routed through the mimic-rewrite path, which normalises their body to CLI
+// wire format before forwarding upstream — the strict reject here is what
+// triggers that safety net.
 func hasRequiredCLIBetaToken(header string) bool {
 	if header == "" {
 		return false
@@ -220,7 +219,7 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	// "字符串 system""数组 system 但模板不匹配"等情形。
 	if !v.hasClaudeCodeSystemPrompt(body) {
 		preview, kind, segments, totalRunes := firstSystemTextPreview(body, 400)
-		logRejected(r, "4.1_system_prompt", "no_matching_template",
+		logRejectedWithShape(r, body, "4.1_system_prompt", "no_matching_template",
 			"system_kind", kind,
 			"system_segments", segments,
 			"system_first_runes", totalRunes,
@@ -231,65 +230,64 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	// 4.2 严格校验必需的 headers，对齐真实 CLI 抓包指纹
 	//   - X-App 必须等于官方 CLI 发出的 "cli"（大小写不敏感以兼容代理改写）
 	//   - anthropic-version 必须等于官方稳定版本 "2023-06-01"
-	//   - anthropic-beta 软检查 CLI 标识 token claude-code-20250219（缺失只告警）
+	//   - anthropic-beta 必须包含 CLI 标识 token claude-code-20250219
 	//   - anthropic-dangerous-direct-browser-access 必须等于 "true"（CLI 硬编码）
 	//   - X-Stainless-Lang 必须等于 "js"（Node SDK 固定值）
 	//   - X-Stainless-Package-Version 必须存在（值随版本变化故只校验非空）
 	//   - X-Stainless-OS 必须是 CLI 已知 OS 之一（MacOS/Linux/Windows）
 	if !strings.EqualFold(r.Header.Get("X-App"), expectedXAppValue) {
-		logRejected(r, "4.2_x_app", "mismatch", "x_app", r.Header.Get("X-App"))
+		logRejectedWithShape(r, body, "4.2_x_app", "mismatch", "x_app", r.Header.Get("X-App"))
 		return false
 	}
 
 	if r.Header.Get("anthropic-version") != expectedAnthropicVersion {
-		logRejected(r, "4.2_anthropic_version", "mismatch", "anthropic_version", r.Header.Get("anthropic-version"))
+		logRejectedWithShape(r, body, "4.2_anthropic_version", "mismatch", "anthropic_version", r.Header.Get("anthropic-version"))
 		return false
 	}
 
 	if !hasRequiredCLIBetaToken(r.Header.Get("anthropic-beta")) {
-		// Soft check: newer external/SDK-mode CLI builds drop this token.
-		// Log for visibility but continue validation.
-		logSoftCheck(r, "4.2_anthropic_beta", "missing_claude_code_token", "anthropic_beta", r.Header.Get("anthropic-beta"))
+		logRejectedWithShape(r, body, "4.2_anthropic_beta", "missing_claude_code_token", "anthropic_beta", r.Header.Get("anthropic-beta"))
+		return false
 	}
 
 	if !strings.EqualFold(r.Header.Get("anthropic-dangerous-direct-browser-access"), "true") {
-		logRejected(r, "4.2_dangerous_direct_browser_access", "not_true",
+		logRejectedWithShape(r, body, "4.2_dangerous_direct_browser_access", "not_true",
 			"value", r.Header.Get("anthropic-dangerous-direct-browser-access"))
 		return false
 	}
 
 	if !strings.EqualFold(r.Header.Get("X-Stainless-Lang"), expectedStainlessLang) {
-		logRejected(r, "4.2_x_stainless_lang", "not_js", "x_stainless_lang", r.Header.Get("X-Stainless-Lang"))
+		logRejectedWithShape(r, body, "4.2_x_stainless_lang", "not_js", "x_stainless_lang", r.Header.Get("X-Stainless-Lang"))
 		return false
 	}
 
 	if r.Header.Get("X-Stainless-Package-Version") == "" {
-		logRejected(r, "4.2_x_stainless_package_version", "empty")
+		logRejectedWithShape(r, body, "4.2_x_stainless_package_version", "empty")
 		return false
 	}
 
 	// X-Stainless-OS 必须是 CLI 已知的 OS 标识之一（MacOS/Linux/Windows），
 	// 同时给 4.5 的 Platform 一致性校验提供锚点。
 	if _, ok := stainlessOSToPlatform[r.Header.Get("X-Stainless-OS")]; !ok {
-		logRejected(r, "4.2_x_stainless_os", "unknown", "x_stainless_os", r.Header.Get("X-Stainless-OS"))
+		logRejectedWithShape(r, body, "4.2_x_stainless_os", "unknown", "x_stainless_os", r.Header.Get("X-Stainless-OS"))
 		return false
 	}
 
 	// 4.3 验证 metadata.user_id（结构 + 字段级格式）
 	if body == nil {
-		logRejected(r, "4.3_metadata", "nil_body")
+		logRejectedWithShape(r, body, "4.3_metadata", "nil_body")
 		return false
 	}
 
 	metadata, ok := body["metadata"].(map[string]any)
 	if !ok {
-		logRejected(r, "4.3_metadata", "missing_or_wrong_type")
+		logRejectedWithShape(r, body, "4.3_metadata", "missing_or_wrong_type")
 		return false
 	}
 
 	userID, ok := metadata["user_id"].(string)
 	if !ok || userID == "" {
-		logRejected(r, "4.3_metadata_user_id", "missing_or_empty")
+		logRejectedWithShape(r, body, "4.3_metadata_user_id", "missing_or_empty")
 		return false
 	}
 
@@ -297,7 +295,7 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	if !isStrictMetadataUserID(parsed) {
 		// user_id contains device_id; log only the length to avoid leaking
 		// fingerprint material into logs.
-		logRejected(r, "4.3_metadata_user_id_format", "invalid_format", "user_id_len", len(userID))
+		logRejectedWithShape(r, body, "4.3_metadata_user_id_format", "invalid_format", "user_id_len", len(userID))
 		return false
 	}
 
@@ -333,12 +331,12 @@ func (v *ClaudeCodeValidator) validateEnvBlock(r *http.Request, body map[string]
 	osVersion := extractEnvLineValue(envOSVersionExtractRe, envText)
 	shell := extractEnvLineValue(envShellExtractRe, envText)
 	if platform == "" || osVersion == "" || shell == "" {
-		logRejected(r, "4.5_env_block", "missing_field",
+		logRejectedWithShape(r, body, "4.5_env_block", "missing_field",
 			"platform", platform, "os_version", osVersion, "shell", shell)
 		return false
 	}
 	if _, ok := validClaudeCodePlatforms[platform]; !ok {
-		logRejected(r, "4.5_env_block", "unknown_platform", "platform", platform)
+		logRejectedWithShape(r, body, "4.5_env_block", "unknown_platform", "platform", platform)
 		return false
 	}
 
@@ -346,7 +344,7 @@ func (v *ClaudeCodeValidator) validateEnvBlock(r *http.Request, body map[string]
 	xStainlessOS := r.Header.Get("X-Stainless-OS")
 	expectedPlatform := stainlessOSToPlatform[xStainlessOS]
 	if expectedPlatform != platform {
-		logRejected(r, "4.5_env_block", "platform_os_mismatch",
+		logRejectedWithShape(r, body, "4.5_env_block", "platform_os_mismatch",
 			"platform", platform, "x_stainless_os", xStainlessOS, "expected_platform", expectedPlatform)
 		return false
 	}
@@ -405,15 +403,24 @@ func firstSystemTextPreview(body map[string]any, maxRunes int) (preview string, 
 		return "", systemKindMissing, 0, 0
 	}
 
-	switch v := raw.(type) {
-	case string:
-		runes := []rune(v)
-		firstRunes = len(runes)
-		if maxRunes > 0 && firstRunes > maxRunes {
+	// buildPreview formats the first non-empty text segment for human reading
+	// in reject logs. Skipped entirely when maxRunes <= 0 so shape-only
+	// callers (buildRejectShape) avoid the per-reject allocation.
+	buildPreview := func(text string) string {
+		if maxRunes <= 0 {
+			return ""
+		}
+		runes := []rune(text)
+		if len(runes) > maxRunes {
 			runes = runes[:maxRunes]
 		}
-		preview = strings.NewReplacer("\r", "⏎", "\n", "⏎").Replace(string(runes))
-		return preview, systemKindString, 0, firstRunes
+		return systemPreviewNewlineReplacer.Replace(string(runes))
+	}
+
+	switch v := raw.(type) {
+	case string:
+		firstRunes = utf8.RuneCountInString(v)
+		return buildPreview(v), systemKindString, 0, firstRunes
 
 	case []any:
 		segments = len(v)
@@ -429,18 +436,123 @@ func firstSystemTextPreview(body map[string]any, maxRunes int) (preview string, 
 			if text == "" {
 				continue
 			}
-			runes := []rune(text)
-			firstRunes = len(runes)
-			if maxRunes > 0 && firstRunes > maxRunes {
-				runes = runes[:maxRunes]
-			}
-			preview = strings.NewReplacer("\r", "⏎", "\n", "⏎").Replace(string(runes))
-			return preview, systemKindArray, segments, firstRunes
+			firstRunes = utf8.RuneCountInString(text)
+			return buildPreview(text), systemKindArray, segments, firstRunes
 		}
 		return "", systemKindAllEmpty, segments, 0
 
 	default:
 		return "", systemKindWrongType, 0, 0
+	}
+}
+
+// metadataKind 标识 body.metadata 字段的实际形态。
+const (
+	metadataKindMissing   = "missing"    // body 中无 metadata 字段
+	metadataKindWrongType = "wrong_type" // metadata 存在但不是对象
+	metadataKindPresent   = "present"    // metadata 是对象
+)
+
+// metadataUserIDFormat 标识 metadata.user_id 的格式。
+const (
+	metadataUserIDMissing = "missing" // user_id 字段缺失或为空
+	metadataUserIDLegacy  = "legacy"  // 旧的 user_{hex}_account_..._session_{uuid} 形式
+	metadataUserIDJSON    = "json"    // 新的 JSON 形式（CLI 2.1.78+）
+	metadataUserIDInvalid = "invalid" // 既不是 legacy 也不是有效 JSON
+)
+
+// classifyMetadataShape 仅做诊断分类，不返回任何 user_id 内容（device_id
+// 等指纹材料绝不入日志）。返回 metadata 是否存在、user_id 是否非空、user_id
+// 形式（legacy/json/invalid/missing）。
+func classifyMetadataShape(body map[string]any) (kind string, userIDPresent bool, format string) {
+	if body == nil {
+		return metadataKindMissing, false, metadataUserIDMissing
+	}
+	raw, exists := body["metadata"]
+	if !exists || raw == nil {
+		return metadataKindMissing, false, metadataUserIDMissing
+	}
+	metadata, ok := raw.(map[string]any)
+	if !ok {
+		return metadataKindWrongType, false, metadataUserIDMissing
+	}
+	userID, _ := metadata["user_id"].(string)
+	if userID == "" {
+		return metadataKindPresent, false, metadataUserIDMissing
+	}
+	parsed := ParseMetadataUserID(userID)
+	switch {
+	case parsed == nil:
+		return metadataKindPresent, true, metadataUserIDInvalid
+	case parsed.IsNewFormat:
+		return metadataKindPresent, true, metadataUserIDJSON
+	default:
+		return metadataKindPresent, true, metadataUserIDLegacy
+	}
+}
+
+// uaExternalSuffixPattern 匹配新版 CLI UA 的 (external, cli) 后缀，是诊断
+// 流量来源类型的辅助信号 —— 不用于任何放行决策。
+var uaExternalSuffixPattern = regexp.MustCompile(`(?i)\(external,\s*cli\)`)
+
+// systemPreviewNewlineReplacer collapses CR/LF in system text previews to a
+// single ⏎ sentinel so a multi-line prompt does not split the log line.
+// Hoisted to package scope because the replacer is stateless and reject
+// logs reuse it on every invocation.
+var systemPreviewNewlineReplacer = strings.NewReplacer("\r", "⏎", "\n", "⏎")
+
+// buildRejectShape 在每条 reject 日志附带统一的请求指纹快照。所有字段以
+// shape_ 前缀打头，便于日志检索与聚合分析（"哪些版本/UA 后缀/header 组合
+// 对应哪类 reject"）。
+//
+// 隐私边界：值仅包含结构信号（存在性、长度、判别符），不含任何客户端 body
+// 文本或指纹原文（那些只在调用方按需通过 step-specific 字段附加，例如 4.1
+// 的 system_preview 或 4.4 的 parsed_suffix）。
+func buildRejectShape(r *http.Request, body map[string]any) []any {
+	if r == nil {
+		return nil
+	}
+	ua := r.Header.Get("User-Agent")
+	uaVersion := ExtractCLIVersion(ua)
+	uaExternal := uaExternalSuffixPattern.MatchString(ua)
+
+	anthropicBeta := r.Header.Get("anthropic-beta")
+	betaTokenCount := 0
+	if anthropicBeta != "" {
+		for _, raw := range strings.Split(anthropicBeta, ",") {
+			if strings.TrimSpace(raw) != "" {
+				betaTokenCount++
+			}
+		}
+	}
+
+	dangerousDirectBrowser := strings.EqualFold(
+		r.Header.Get("anthropic-dangerous-direct-browser-access"), "true")
+
+	_, systemKind, systemSegments, _ := firstSystemTextPreview(body, 0)
+	_, hasBillingHeader := findBillingHeaderText(body)
+	_, hasEnvBlock := findEnvBlockText(body)
+
+	metaKind, userIDPresent, userIDFormat := classifyMetadataShape(body)
+
+	return []any{
+		"shape_ua_version", uaVersion,
+		"shape_ua_external", uaExternal,
+		"shape_x_app", r.Header.Get("X-App"),
+		"shape_anthropic_version", r.Header.Get("anthropic-version"),
+		"shape_beta_tokens", betaTokenCount,
+		"shape_has_cc_beta_token", hasRequiredCLIBetaToken(anthropicBeta),
+		"shape_has_dangerous_direct_browser", dangerousDirectBrowser,
+		"shape_x_stainless_lang", r.Header.Get("X-Stainless-Lang"),
+		"shape_x_stainless_os", r.Header.Get("X-Stainless-OS"),
+		"shape_x_stainless_pkg_present", r.Header.Get("X-Stainless-Package-Version") != "",
+		"shape_system_kind", systemKind,
+		"shape_system_segments", systemSegments,
+		"shape_has_billing_header", hasBillingHeader,
+		"shape_has_env_block", hasEnvBlock,
+		"shape_metadata_kind", metaKind,
+		"shape_has_metadata_user_id", userIDPresent,
+		"shape_metadata_user_id_format", userIDFormat,
 	}
 }
 
@@ -463,7 +575,7 @@ func extractEnvLineValue(re *regexp.Regexp, text string) string {
 func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body map[string]any) bool {
 	uaVersion := ExtractCLIVersion(r.Header.Get("User-Agent"))
 	if uaVersion == "" {
-		logRejected(r, "4.4_cc_version", "ua_version_unparseable")
+		logRejectedWithShape(r, body, "4.4_cc_version", "ua_version_unparseable")
 		return false
 	}
 	// 老版本无 billing header，跳过该项校验
@@ -473,19 +585,19 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 
 	billingText, ok := findBillingHeaderText(body)
 	if !ok {
-		logRejected(r, "4.4_cc_version", "billing_header_missing", "ua_version", uaVersion)
+		logRejectedWithShape(r, body, "4.4_cc_version", "billing_header_missing", "ua_version", uaVersion)
 		return false
 	}
 
 	matches := ccVersionParseRe.FindStringSubmatch(billingText)
 	if matches == nil {
-		logRejected(r, "4.4_cc_version", "cc_version_unparseable",
+		logRejectedWithShape(r, body, "4.4_cc_version", "cc_version_unparseable",
 			"ua_version", uaVersion, "billing_text", billingText)
 		return false
 	}
 	parsedVersion, parsedSuffix := matches[1], matches[2]
 	if parsedVersion != uaVersion {
-		logRejected(r, "4.4_cc_version", "version_ua_mismatch",
+		logRejectedWithShape(r, body, "4.4_cc_version", "version_ua_mismatch",
 			"ua_version", uaVersion, "parsed_version", parsedVersion)
 		return false
 	}
@@ -493,7 +605,7 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 	firstUserText := extractFirstUserMessageTextFromMap(body)
 	expected := computeBillingHeaderSuffixFromText(firstUserText, uaVersion)
 	if parsedSuffix != expected {
-		logRejected(r, "4.4_cc_version", "suffix_mismatch",
+		logRejectedWithShape(r, body, "4.4_cc_version", "suffix_mismatch",
 			"ua_version", uaVersion,
 			"parsed_suffix", parsedSuffix,
 			"expected_suffix", expected,
