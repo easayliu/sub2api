@@ -216,11 +216,12 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	// Step 4: messages 路径，进行严格验证
 
 	// 4.1 检查 system prompt 相似度。
-	// 拒绝时附带首条 system text 的截断预览 + 总段数，便于辨认未知客户端
-	// 形态并为 claudeCodeSystemPrompts 补充模板。
+	// 拒绝时附带 system 字段形态 + 截断预览 + 段数，用于区分"无 system"
+	// "字符串 system""数组 system 但模板不匹配"等情形。
 	if !v.hasClaudeCodeSystemPrompt(body) {
-		preview, segments, totalRunes := firstSystemTextPreview(body, 400)
+		preview, kind, segments, totalRunes := firstSystemTextPreview(body, 400)
 		logRejected(r, "4.1_system_prompt", "no_matching_template",
+			"system_kind", kind,
 			"system_segments", segments,
 			"system_first_runes", totalRunes,
 			"system_preview", preview)
@@ -377,39 +378,70 @@ func findEnvBlockText(body map[string]any) (string, bool) {
 	return "", false
 }
 
-// firstSystemTextPreview 用于 4.1 reject 日志：返回 body.system[] 中第一个非空
-// text 段的截断预览（按 rune 截断，最多 maxRunes 个 rune），同时返回 system
-// 段总数和首段的 rune 数。供运维辨认未知客户端形态、补充 prompt 模板使用。
+// systemKind 标识 body.system 字段的实际形态。诊断 4.1 reject 时需要
+// 区分"无 system"/"字符串 system"/"数组 system"等，因为 Anthropic API
+// 同时接受 system 为字符串和内容块数组两种写法。
+const (
+	systemKindMissing    = "missing"     // body 中不存在 system 字段
+	systemKindString     = "string"      // body.system 是顶层字符串
+	systemKindArray      = "array"       // body.system 是 []any 且至少有一个非空 text 段
+	systemKindEmptyArray = "empty_array" // body.system 是 []any 但 len == 0
+	systemKindAllEmpty   = "all_empty"   // body.system 是 []any，但所有 entry 的 text 字段为空/缺失
+	systemKindWrongType  = "wrong_type"  // body.system 既不是字符串也不是 []any
+)
+
+// firstSystemTextPreview 用于 4.1 reject 日志：返回 body.system 第一个非空
+// text 段的截断预览（按 rune 截断，最多 maxRunes 个 rune），并返回 kind
+// 标识 system 字段实际形态、segments（数组长度，字符串/缺失为 0）、firstRunes
+// （首段 rune 数）。供运维辨认未知客户端形态、补充 prompt 模板使用。
 //
 // 截断时会把行末的 \r/\n 替换为 ⏎，避免日志被多行打乱。
-// body 为空、结构异常或所有 text 段为空时，preview 返回空串。
-func firstSystemTextPreview(body map[string]any, maxRunes int) (preview string, segments int, firstRunes int) {
+func firstSystemTextPreview(body map[string]any, maxRunes int) (preview string, kind string, segments int, firstRunes int) {
 	if body == nil {
-		return "", 0, 0
+		return "", systemKindMissing, 0, 0
 	}
-	systemEntries, ok := body["system"].([]any)
-	if !ok {
-		return "", 0, 0
+	raw, exists := body["system"]
+	if !exists || raw == nil {
+		return "", systemKindMissing, 0, 0
 	}
-	segments = len(systemEntries)
-	for _, entry := range systemEntries {
-		entryMap, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
-		text, _ := entryMap["text"].(string)
-		if text == "" {
-			continue
-		}
-		runes := []rune(text)
+
+	switch v := raw.(type) {
+	case string:
+		runes := []rune(v)
 		firstRunes = len(runes)
 		if maxRunes > 0 && firstRunes > maxRunes {
 			runes = runes[:maxRunes]
 		}
 		preview = strings.NewReplacer("\r", "⏎", "\n", "⏎").Replace(string(runes))
-		return preview, segments, firstRunes
+		return preview, systemKindString, 0, firstRunes
+
+	case []any:
+		segments = len(v)
+		if segments == 0 {
+			return "", systemKindEmptyArray, 0, 0
+		}
+		for _, entry := range v {
+			entryMap, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			text, _ := entryMap["text"].(string)
+			if text == "" {
+				continue
+			}
+			runes := []rune(text)
+			firstRunes = len(runes)
+			if maxRunes > 0 && firstRunes > maxRunes {
+				runes = runes[:maxRunes]
+			}
+			preview = strings.NewReplacer("\r", "⏎", "\n", "⏎").Replace(string(runes))
+			return preview, systemKindArray, segments, firstRunes
+		}
+		return "", systemKindAllEmpty, segments, 0
+
+	default:
+		return "", systemKindWrongType, 0, 0
 	}
-	return "", segments, 0
 }
 
 // extractEnvLineValue 用提取型正则取出 `- Field: value` 行的 value（trim 空白）。

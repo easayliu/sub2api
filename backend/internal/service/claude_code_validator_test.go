@@ -12,21 +12,65 @@ import (
 )
 
 func TestFirstSystemTextPreview(t *testing.T) {
-	t.Run("nil body", func(t *testing.T) {
-		preview, segs, runes := firstSystemTextPreview(nil, 100)
+	t.Run("nil body → missing", func(t *testing.T) {
+		preview, kind, segs, runes := firstSystemTextPreview(nil, 100)
 		require.Equal(t, "", preview)
+		require.Equal(t, systemKindMissing, kind)
 		require.Equal(t, 0, segs)
 		require.Equal(t, 0, runes)
 	})
 
-	t.Run("missing system field", func(t *testing.T) {
-		preview, segs, runes := firstSystemTextPreview(map[string]any{}, 100)
+	t.Run("no system field → missing", func(t *testing.T) {
+		preview, kind, segs, runes := firstSystemTextPreview(map[string]any{}, 100)
 		require.Equal(t, "", preview)
+		require.Equal(t, systemKindMissing, kind)
 		require.Equal(t, 0, segs)
 		require.Equal(t, 0, runes)
 	})
 
-	t.Run("first non-empty text returned, total segs counted", func(t *testing.T) {
+	t.Run("system is nil → missing", func(t *testing.T) {
+		body := map[string]any{"system": nil}
+		_, kind, _, _ := firstSystemTextPreview(body, 100)
+		require.Equal(t, systemKindMissing, kind)
+	})
+
+	t.Run("system as string → string kind, preview from string", func(t *testing.T) {
+		body := map[string]any{"system": "You are Claude Code, Anthropic's official CLI for Claude."}
+		preview, kind, segs, runes := firstSystemTextPreview(body, 100)
+		require.Equal(t, "You are Claude Code, Anthropic's official CLI for Claude.", preview)
+		require.Equal(t, systemKindString, kind)
+		require.Equal(t, 0, segs)
+		require.Equal(t, len([]rune("You are Claude Code, Anthropic's official CLI for Claude.")), runes)
+	})
+
+	t.Run("system as empty array → empty_array", func(t *testing.T) {
+		body := map[string]any{"system": []any{}}
+		preview, kind, segs, runes := firstSystemTextPreview(body, 100)
+		require.Equal(t, "", preview)
+		require.Equal(t, systemKindEmptyArray, kind)
+		require.Equal(t, 0, segs)
+		require.Equal(t, 0, runes)
+	})
+
+	t.Run("system as array of all-empty entries → all_empty", func(t *testing.T) {
+		body := map[string]any{"system": []any{
+			map[string]any{"type": "text", "text": ""},
+			map[string]any{"type": "text"},
+		}}
+		preview, kind, segs, runes := firstSystemTextPreview(body, 100)
+		require.Equal(t, "", preview)
+		require.Equal(t, systemKindAllEmpty, kind)
+		require.Equal(t, 2, segs)
+		require.Equal(t, 0, runes)
+	})
+
+	t.Run("system as wrong type (number) → wrong_type", func(t *testing.T) {
+		body := map[string]any{"system": 42}
+		_, kind, _, _ := firstSystemTextPreview(body, 100)
+		require.Equal(t, systemKindWrongType, kind)
+	})
+
+	t.Run("system as array → array kind, first non-empty text returned", func(t *testing.T) {
 		body := map[string]any{
 			"system": []any{
 				map[string]any{"type": "text", "text": ""},
@@ -34,22 +78,31 @@ func TestFirstSystemTextPreview(t *testing.T) {
 				map[string]any{"type": "text", "text": "second segment"},
 			},
 		}
-		preview, segs, runes := firstSystemTextPreview(body, 100)
+		preview, kind, segs, runes := firstSystemTextPreview(body, 100)
 		require.Equal(t, "hello world", preview)
+		require.Equal(t, systemKindArray, kind)
 		require.Equal(t, 3, segs)
 		require.Equal(t, len([]rune("hello world")), runes)
 	})
 
-	t.Run("rune-safe truncation for multi-byte chars", func(t *testing.T) {
-		// 12 个汉字 = 12 rune, 36 字节; 截到 5 rune 不应破坏 utf8
+	t.Run("rune-safe truncation for multi-byte chars (array form)", func(t *testing.T) {
 		body := map[string]any{
 			"system": []any{
 				map[string]any{"type": "text", "text": "你好世界这是一段中文文本"},
 			},
 		}
-		preview, segs, runes := firstSystemTextPreview(body, 5)
+		preview, kind, segs, runes := firstSystemTextPreview(body, 5)
 		require.Equal(t, "你好世界这", preview)
+		require.Equal(t, systemKindArray, kind)
 		require.Equal(t, 1, segs)
+		require.Equal(t, 12, runes)
+	})
+
+	t.Run("rune-safe truncation for multi-byte chars (string form)", func(t *testing.T) {
+		body := map[string]any{"system": "你好世界这是一段中文文本"}
+		preview, kind, _, runes := firstSystemTextPreview(body, 5)
+		require.Equal(t, "你好世界这", preview)
+		require.Equal(t, systemKindString, kind)
 		require.Equal(t, 12, runes)
 	})
 
@@ -59,7 +112,7 @@ func TestFirstSystemTextPreview(t *testing.T) {
 				map[string]any{"type": "text", "text": "line1\nline2\r\nline3"},
 			},
 		}
-		preview, _, _ := firstSystemTextPreview(body, 100)
+		preview, _, _, _ := firstSystemTextPreview(body, 100)
 		require.False(t, strings.ContainsAny(preview, "\r\n"))
 		require.Contains(t, preview, "line1⏎line2⏎⏎line3")
 	})
