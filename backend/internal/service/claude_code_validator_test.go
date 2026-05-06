@@ -4,11 +4,66 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/stretchr/testify/require"
 )
+
+func TestFirstSystemTextPreview(t *testing.T) {
+	t.Run("nil body", func(t *testing.T) {
+		preview, segs, runes := firstSystemTextPreview(nil, 100)
+		require.Equal(t, "", preview)
+		require.Equal(t, 0, segs)
+		require.Equal(t, 0, runes)
+	})
+
+	t.Run("missing system field", func(t *testing.T) {
+		preview, segs, runes := firstSystemTextPreview(map[string]any{}, 100)
+		require.Equal(t, "", preview)
+		require.Equal(t, 0, segs)
+		require.Equal(t, 0, runes)
+	})
+
+	t.Run("first non-empty text returned, total segs counted", func(t *testing.T) {
+		body := map[string]any{
+			"system": []any{
+				map[string]any{"type": "text", "text": ""},
+				map[string]any{"type": "text", "text": "hello world"},
+				map[string]any{"type": "text", "text": "second segment"},
+			},
+		}
+		preview, segs, runes := firstSystemTextPreview(body, 100)
+		require.Equal(t, "hello world", preview)
+		require.Equal(t, 3, segs)
+		require.Equal(t, len([]rune("hello world")), runes)
+	})
+
+	t.Run("rune-safe truncation for multi-byte chars", func(t *testing.T) {
+		// 12 个汉字 = 12 rune, 36 字节; 截到 5 rune 不应破坏 utf8
+		body := map[string]any{
+			"system": []any{
+				map[string]any{"type": "text", "text": "你好世界这是一段中文文本"},
+			},
+		}
+		preview, segs, runes := firstSystemTextPreview(body, 5)
+		require.Equal(t, "你好世界这", preview)
+		require.Equal(t, 1, segs)
+		require.Equal(t, 12, runes)
+	})
+
+	t.Run("newlines replaced with sentinel", func(t *testing.T) {
+		body := map[string]any{
+			"system": []any{
+				map[string]any{"type": "text", "text": "line1\nline2\r\nline3"},
+			},
+		}
+		preview, _, _ := firstSystemTextPreview(body, 100)
+		require.False(t, strings.ContainsAny(preview, "\r\n"))
+		require.Contains(t, preview, "line1⏎line2⏎⏎line3")
+	})
+}
 
 func TestClaudeCodeValidator_ProbeBypass(t *testing.T) {
 	validator := NewClaudeCodeValidator()
