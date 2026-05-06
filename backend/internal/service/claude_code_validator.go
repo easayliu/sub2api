@@ -40,6 +40,23 @@ func logRejectedWithShape(r *http.Request, body map[string]any, step, reason str
 	logRejected(r, step, reason, combined...)
 }
 
+// logSoftCheckWithShape emits a diagnostic warning under the
+// claude_code_validator_soft_warn keyword, paired with the same fingerprint
+// snapshot used by reject logs. Unlike logRejectedWithShape, callers do not
+// fail validation — used for indicators worth surfacing for observability
+// but too noisy / proxy-sensitive to gate traffic on.
+func logSoftCheckWithShape(r *http.Request, body map[string]any, step, reason string, extras ...any) {
+	attrs := []any{
+		"step", step,
+		"reason", reason,
+		"ua", r.Header.Get("User-Agent"),
+		"path", r.URL.Path,
+	}
+	attrs = append(attrs, extras...)
+	attrs = append(attrs, buildRejectShape(r, body)...)
+	slog.Warn("claude_code_validator_soft_warn", attrs...)
+}
+
 // ClaudeCodeValidator 验证请求是否来自 Claude Code 客户端
 // 完全学习自 claude-relay-service 项目的验证逻辑
 type ClaudeCodeValidator struct{}
@@ -299,13 +316,13 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 		return false
 	}
 
-	// 4.4 校验 system 中 x-anthropic-billing-header 段的 cc_version 后三位。
-	// CLI v2.1.77+ 通过 SHA256(salt + first_user_text[4,7,20] + version)[:3] 派生
-	// 该后缀；伪造客户端要么完全省略 billing header，要么只能写出错误的 suffix。
-	// 仅对发出该 header 的 CLI 版本（>= 2.1.77）强制存在性 + 正确性。
-	if !v.validateBillingHeaderSuffix(r, body) {
-		return false
-	}
+	// 4.4 仅记录 system 中 x-anthropic-billing-header 段的 cc_version suffix
+	// 诊断日志，不再阻断。该后缀由 SHA256(salt + first_user_text[4,7,20] +
+	// version)[:3] 派生（CLI v2.1.77+），但任何在我们之前/之后改写正文的
+	// 中间件（含我们自己的 mimic-rewrite 链路）都会破坏 4/7/20 三个位置的
+	// 字符，导致即使是合法 CLI 流量也无法稳定通过 suffix 校验。保留诊断
+	// 信号但降级为 soft warn，避免误杀。
+	v.recordBillingHeaderSuffixCheck(r, body)
 
 	// 4.5 env block 存在则严格校验。
 	// system 中若出现 envBlockSentinel，则其 Platform/OS Version/Shell 三行
@@ -566,53 +583,55 @@ func extractEnvLineValue(re *regexp.Regexp, text string) string {
 	return strings.TrimSpace(m[1])
 }
 
-// validateBillingHeaderSuffix 校验请求 body system 中 x-anthropic-billing-header
-// 段的 cc_version 后三位 suffix。返回 false 表示伪造或被篡改。
+// recordBillingHeaderSuffixCheck emits diagnostic logs for the
+// x-anthropic-billing-header cc_version suffix without rejecting traffic.
+// CLI v2.1.77+ derives the suffix as SHA256(salt + first_user_text[4,7,20]
+// + version)[:3], but any middleware that rewrites the body (including our
+// own mimic path) perturbs those character positions and would falsely fail
+// a strict re-derivation. Logged via logSoftCheckWithShape so the signal
+// stays available for forensics without bouncing legitimate clients.
 //
-//   - UA version < 2.1.77：兼容旧版本，跳过校验
-//   - billing header 段缺失（在 >= 2.1.77 下）：reject
-//   - cc_version=X.Y.Z.SSS 解析失败、X.Y.Z 与 UA 不一致、SSS 不匹配重算结果：reject
-func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body map[string]any) bool {
+//   - UA version < 2.1.77: silent, billing header not yet emitted
+//   - billing header missing / cc_version unparseable / version mismatch /
+//     suffix mismatch: emitted as claude_code_validator_soft_warn
+func (v *ClaudeCodeValidator) recordBillingHeaderSuffixCheck(r *http.Request, body map[string]any) {
 	uaVersion := ExtractCLIVersion(r.Header.Get("User-Agent"))
 	if uaVersion == "" {
-		logRejectedWithShape(r, body, "4.4_cc_version", "ua_version_unparseable")
-		return false
+		logSoftCheckWithShape(r, body, "4.4_cc_version", "ua_version_unparseable")
+		return
 	}
-	// 老版本无 billing header，跳过该项校验
 	if CompareVersions(uaVersion, billingHeaderMinVersion) < 0 {
-		return true
+		return
 	}
 
 	billingText, ok := findBillingHeaderText(body)
 	if !ok {
-		logRejectedWithShape(r, body, "4.4_cc_version", "billing_header_missing", "ua_version", uaVersion)
-		return false
+		logSoftCheckWithShape(r, body, "4.4_cc_version", "billing_header_missing", "ua_version", uaVersion)
+		return
 	}
 
 	matches := ccVersionParseRe.FindStringSubmatch(billingText)
 	if matches == nil {
-		logRejectedWithShape(r, body, "4.4_cc_version", "cc_version_unparseable",
+		logSoftCheckWithShape(r, body, "4.4_cc_version", "cc_version_unparseable",
 			"ua_version", uaVersion, "billing_text", billingText)
-		return false
+		return
 	}
 	parsedVersion, parsedSuffix := matches[1], matches[2]
 	if parsedVersion != uaVersion {
-		logRejectedWithShape(r, body, "4.4_cc_version", "version_ua_mismatch",
+		logSoftCheckWithShape(r, body, "4.4_cc_version", "version_ua_mismatch",
 			"ua_version", uaVersion, "parsed_version", parsedVersion)
-		return false
+		return
 	}
 
 	firstUserText := extractFirstUserMessageTextFromMap(body)
 	expected := computeBillingHeaderSuffixFromText(firstUserText, uaVersion)
 	if parsedSuffix != expected {
-		logRejectedWithShape(r, body, "4.4_cc_version", "suffix_mismatch",
+		logSoftCheckWithShape(r, body, "4.4_cc_version", "suffix_mismatch",
 			"ua_version", uaVersion,
 			"parsed_suffix", parsedSuffix,
 			"expected_suffix", expected,
 			"first_user_text_runes", utf8.RuneCountInString(firstUserText))
-		return false
 	}
-	return true
 }
 
 // findBillingHeaderText 返回 body.system 中以 "x-anthropic-billing-header" 起首
