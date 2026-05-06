@@ -389,8 +389,10 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			require.True(t, ok, "system[3] should be an object, got %T", systemArr[3])
 			require.Equal(t, "text", block3["type"])
 			require.Equal(t, defaultClaudeCodeEnvPrompt, block3["text"])
-			require.Nil(t, block3["cache_control"],
-				"system[3] (env block) must NOT carry cache_control per CLI capture")
+			cc3, ok := block3["cache_control"].(map[string]any)
+			require.True(t, ok, "system[3] (env block) must carry cache_control per 2.1.123 capture")
+			require.Equal(t, "ephemeral", cc3["type"])
+			require.Equal(t, "1h", cc3["ttl"])
 
 			// 防回退：每个 block 的 JSON key 顺序必须 type→text(→cache_control)，scope 在 ttl 后
 			raw := string(result)
@@ -442,7 +444,7 @@ func TestMimicCLIBodyFields(t *testing.T) {
 }
 
 func TestMimicCLIMessages(t *testing.T) {
-	t.Run("string content wrapped to array + cache_control attached", func(t *testing.T) {
+	t.Run("string content: reminder prepended + cache_control on user text", func(t *testing.T) {
 		body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 		out := mimicCLIMessages(body)
 
@@ -456,12 +458,20 @@ func TestMimicCLIMessages(t *testing.T) {
 		require.True(t, ok, "first message should be a map")
 		content, ok := firstMsg["content"].([]any)
 		require.True(t, ok, "content should be an array")
-		require.Len(t, content, 1)
-		block, ok := content[0].(map[string]any)
-		require.True(t, ok, "block should be a map")
-		require.Equal(t, "text", block["type"])
-		require.Equal(t, "hello", block["text"])
-		cc, ok := block["cache_control"].(map[string]any)
+		require.Len(t, content, 2, "first user message gets currentDate reminder prepended")
+
+		reminder, ok := content[0].(map[string]any)
+		require.True(t, ok, "reminder block should be a map")
+		require.Equal(t, "text", reminder["type"])
+		require.Contains(t, reminder["text"], "<system-reminder>")
+		require.Contains(t, reminder["text"], "# currentDate")
+		require.Nil(t, reminder["cache_control"], "reminder block carries no cache_control")
+
+		userBlock, ok := content[1].(map[string]any)
+		require.True(t, ok, "user block should be a map")
+		require.Equal(t, "text", userBlock["type"])
+		require.Equal(t, "hello", userBlock["text"])
+		cc, ok := userBlock["cache_control"].(map[string]any)
 		require.True(t, ok, "cache_control should be a map")
 		require.Equal(t, "ephemeral", cc["type"])
 		require.Equal(t, "1h", cc["ttl"])
@@ -470,38 +480,50 @@ func TestMimicCLIMessages(t *testing.T) {
 		raw := string(out)
 		typePos := strings.Index(raw, `"type":"text"`)
 		textPos := strings.Index(raw, `"text":"hello"`)
-		ccPos := strings.Index(raw, `"cache_control"`)
+		ccPos := strings.Index(raw, `"cache_control":{"type":"ephemeral","ttl":"1h"}`)
 		require.True(t, typePos < textPos && textPos < ccPos,
 			"content block keys must be type→text→cache_control, got: %s", raw)
-		// cache_control 内部 type 必须先于 ttl
-		ccTypePos := strings.Index(raw, `"cache_control":{"type"`)
-		require.NotEqual(t, -1, ccTypePos, "cache_control must start with type, got: %s", raw)
 	})
 
-	t.Run("array content - cache_control on last text block", func(t *testing.T) {
+	t.Run("array content - reminder prepended + cache_control on last text block", func(t *testing.T) {
 		body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"last"}]}]}`)
 		out := mimicCLIMessages(body)
 
 		content := gjson.GetBytes(out, "messages.0.content").Array()
-		require.Len(t, content, 2)
+		require.Len(t, content, 3, "reminder prepended ahead of the existing two text blocks")
+		require.Contains(t, content[0].Get("text").String(), "<system-reminder>")
 		require.False(t, content[0].Get("cache_control").Exists())
-		require.Equal(t, "ephemeral", content[1].Get("cache_control.type").String())
-		require.Equal(t, "1h", content[1].Get("cache_control.ttl").String())
+		require.False(t, content[1].Get("cache_control").Exists())
+		require.Equal(t, "ephemeral", content[2].Get("cache_control.type").String())
+		require.Equal(t, "1h", content[2].Get("cache_control.ttl").String())
 	})
 
-	t.Run("multi-turn - cache_control only on LAST user's last text block", func(t *testing.T) {
+	t.Run("multi-turn - reminder only on first user, cache_control only on LAST user's last text block", func(t *testing.T) {
 		body := []byte(`{"messages":[{"role":"user","content":"q1"},{"role":"assistant","content":"a1"},{"role":"user","content":"q2"}]}`)
 		out := mimicCLIMessages(body)
 
+		require.Len(t, gjson.GetBytes(out, "messages.0.content").Array(), 2,
+			"first user message gets reminder block prepended")
+		require.Contains(t, gjson.GetBytes(out, "messages.0.content.0.text").String(), "<system-reminder>")
 		require.False(t, gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists())
+		require.False(t, gjson.GetBytes(out, "messages.0.content.1.cache_control").Exists())
 		require.False(t, gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists())
+
+		require.Len(t, gjson.GetBytes(out, "messages.2.content").Array(), 1,
+			"second user message must NOT get a reminder")
 		require.Equal(t, "ephemeral", gjson.GetBytes(out, "messages.2.content.0.cache_control.type").String())
 	})
 
-	t.Run("idempotent: existing cache_control left alone", func(t *testing.T) {
+	t.Run("idempotent: existing cache_control left alone after reminder prepended", func(t *testing.T) {
 		body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]}`)
 		out := mimicCLIMessages(body)
-		require.Equal(t, "5m", gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").String())
+
+		content := gjson.GetBytes(out, "messages.0.content").Array()
+		require.Len(t, content, 2)
+		require.Contains(t, content[0].Get("text").String(), "<system-reminder>")
+		require.False(t, content[0].Get("cache_control").Exists())
+		require.Equal(t, "5m", content[1].Get("cache_control.ttl").String(),
+			"client-supplied ttl on user text must be preserved")
 	})
 
 	t.Run("tool_result-only user message - skip cache_control", func(t *testing.T) {

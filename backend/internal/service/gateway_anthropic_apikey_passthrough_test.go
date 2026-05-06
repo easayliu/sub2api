@@ -781,15 +781,22 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			require.Equal(t, "1h", blocks[2].Get("cache_control.ttl").String())
 			require.Equal(t, "global", blocks[2].Get("cache_control.scope").String())
 
-			// system[3]: default env / session / memory template (no cache_control)
+			// system[3]: default env / session / memory template (cache_control: ephemeral, 1h)
 			require.Equal(t, defaultClaudeCodeEnvPrompt, blocks[3].Get("text").String())
-			require.False(t, blocks[3].Get("cache_control").Exists())
+			require.Equal(t, "ephemeral", blocks[3].Get("cache_control.type").String())
+			require.Equal(t, "1h", blocks[3].Get("cache_control.ttl").String())
 
-			// messages 不应被改动：仍只有原始 1 条
+			// messages: original user turn preserved as the LAST text block of content,
+			// preceded by the currentDate <system-reminder> block prepended by mimic.
 			messages := gjson.GetBytes(upstream.lastBody, "messages")
 			require.True(t, messages.IsArray())
 			require.Len(t, messages.Array(), 1)
-			require.Equal(t, "hello", messages.Array()[0].Get("content.0.text").String())
+			content := messages.Array()[0].Get("content").Array()
+			require.Len(t, content, 2,
+				"first user message gets currentDate reminder prepended ahead of user text")
+			require.Contains(t, content[0].Get("text").String(), "<system-reminder>")
+			require.Contains(t, content[0].Get("text").String(), "# currentDate")
+			require.Equal(t, "hello", content[1].Get("text").String())
 		})
 	}
 }

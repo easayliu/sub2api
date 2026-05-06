@@ -4164,7 +4164,8 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 //	[1] Claude Code banner — 无 cache_control
 //	[2] agent 指令（原始 system 或 default agent prompt fallback）
 //	    — 带 cache_control {ephemeral, ttl=1h, scope=global}
-//	[3] environment / session / memory / runtime 指令（static template）— 无 cache_control
+//	[3] environment / session / memory / runtime 指令（static template）
+//	    — 带 cache_control {ephemeral, ttl=1h}（与 2.1.123 抓包一致）
 //
 // messages 不再插入 [System Instructions]/ack 伪对话，避免在消息层留下第三方特征。
 func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
@@ -4213,6 +4214,10 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 		{
 			Type: "text",
 			Text: defaultClaudeCodeEnvPrompt,
+			CacheControl: &anthropicCacheControlPayload{
+				Type: "ephemeral",
+				TTL:  "1h",
+			},
 		},
 	}
 
@@ -4225,7 +4230,9 @@ func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
 }
 
 // mimicCLIMessages aligns messages structure with direct-CLI traffic for non-CLI
-// clients: (1) wraps string-form content in [{type:"text", text:<str>}]; (2) ensures
+// clients: (1) wraps string-form content in [{type:"text", text:<str>}]; (2) prepends
+// the currentDate <system-reminder> block to the first user message's content array
+// (real CLI 2.1.123 always carries this ahead of the user-typed text); (3) ensures
 // the last text block of the last user message carries cache_control: ephemeral+ttl=1h
 // so prompt caching still kicks in. Tool-only / tool_result messages are left alone.
 func mimicCLIMessages(body []byte) []byte {
@@ -4248,6 +4255,8 @@ func mimicCLIMessages(body []byte) []byte {
 		}
 		return true
 	})
+
+	out = prependCurrentDateReminder(out)
 
 	msgs := gjson.GetBytes(out, "messages").Array()
 	lastUserIdx := -1
@@ -4284,6 +4293,71 @@ func mimicCLIMessages(body []byte) []byte {
 		out = next
 	}
 	return out
+}
+
+// prependCurrentDateReminder mirrors CLI 2.1.123 behavior of prepending a
+// <system-reminder> currentDate context block to the first user message's
+// content array. Skipped when the first user message has no text blocks
+// (e.g. tool_result-only turn); the reminder is meant to wrap user-typed
+// input, not agent-internal tool returns.
+//
+// Block content is captured verbatim from CLI 2.1.123 traffic; only the date
+// is computed at request time (UTC) so the wrapper stays current without
+// requiring per-session client state.
+func prependCurrentDateReminder(body []byte) []byte {
+	msgs := gjson.GetBytes(body, "messages")
+	if !msgs.IsArray() {
+		return body
+	}
+
+	firstUserIdx := -1
+	msgs.ForEach(func(k, v gjson.Result) bool {
+		if v.Get("role").String() == "user" {
+			firstUserIdx = int(k.Int())
+			return false
+		}
+		return true
+	})
+	if firstUserIdx < 0 {
+		return body
+	}
+
+	contentResult := gjson.GetBytes(body, fmt.Sprintf("messages.%d.content", firstUserIdx))
+	if !contentResult.IsArray() {
+		return body
+	}
+
+	hasText := false
+	contentResult.ForEach(func(_, v gjson.Result) bool {
+		if v.Get("type").String() == "text" {
+			hasText = true
+			return false
+		}
+		return true
+	})
+	if !hasText {
+		return body
+	}
+
+	today := time.Now().UTC().Format("2006-01-02")
+	reminder := anthropicSystemTextBlockPayload{
+		Type: "text",
+		Text: "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is " + today + ".\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n",
+	}
+	reminderRaw, err := json.Marshal(reminder)
+	if err != nil {
+		return body
+	}
+
+	items := [][]byte{reminderRaw}
+	contentResult.ForEach(func(_, v gjson.Result) bool {
+		items = append(items, []byte(v.Raw))
+		return true
+	})
+	if next, ok := setJSONRawBytes(body, fmt.Sprintf("messages.%d.content", firstUserIdx), buildJSONArrayRaw(items)); ok {
+		return next
+	}
+	return body
 }
 
 // mimicCLIBodyFields injects the three top-level fields CLI 2.1.123 unconditionally
