@@ -51,6 +51,41 @@ var (
 // (claude_code_validator.go) to locate the env preamble.
 const envBlockSentinel = "You have been invoked in the following environment:"
 
+// canonicalCLIUASuffix is the unified parenthesized UA suffix every real
+// Claude CLI request is rewritten to. The official CLI emits multiple
+// family suffixes — "(external, cli)" for the terminal binary,
+// "(external, sdk-cli)" for the SDK entry, and
+// "(external, claude-vscode, agent-sdk/X.Y.Z)" for the VSCode extension —
+// and an account that mixes them produces a multi-family cluster signal in
+// Anthropic's view. Normalizing every CLI UA's suffix to this canonical
+// value keeps each account presenting as a single client family upstream
+// while leaving the X.Y.Z version free to follow the per-account
+// isNewerVersion monotonic upgrade.
+const canonicalCLIUASuffix = " (external, cli)"
+
+// claudeCLIUAPrefixRegex captures the version of any claude-cli UA so the
+// suffix can be replaced with canonicalCLIUASuffix. Returns no match for
+// non-CLI User-Agents (browsers, scanners, etc.) — those are left
+// unchanged because they are not version-tracked CLI clients.
+var claudeCLIUAPrefixRegex = regexp.MustCompile(`(?i)^claude-cli/(\d+\.\d+\.\d+)`)
+
+// normalizeCLIUA rewrites a claude-cli User-Agent so its parenthesized
+// family suffix is always "(external, cli)". The version (X.Y.Z) is
+// preserved so the per-account version lock keeps following client
+// upgrades. Returns the input unchanged when:
+//   - input is empty
+//   - input does not match the claude-cli/X.Y.Z prefix (non-CLI traffic)
+func normalizeCLIUA(ua string) string {
+	if ua == "" {
+		return ua
+	}
+	matches := claudeCLIUAPrefixRegex.FindStringSubmatch(ua)
+	if len(matches) < 2 {
+		return ua
+	}
+	return "claude-cli/" + matches[1] + canonicalCLIUASuffix
+}
+
 // Platform bucket names. Each (account, platform) pair holds an independent
 // device_id and canonical profile so we never mix Mac/Win/Linux signals on a
 // single fingerprint. Values match the X-Stainless-OS header verbatim so we
@@ -237,8 +272,10 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header, plat
 	profile := platformProfile(platform)
 	fp := &Fingerprint{}
 
-	// 获取User-Agent
-	if ua := headers.Get("User-Agent"); ua != "" {
+	// 获取User-Agent — 后缀归一化为 canonicalCLIUASuffix 以消除
+	// "(external, cli)" / "(external, sdk-cli)" / "(external, claude-vscode, ...)"
+	// 三种 family 在同账号下并存的集群信号；版本号保留客户端原值。
+	if ua := normalizeCLIUA(headers.Get("User-Agent")); ua != "" {
 		fp.UserAgent = ua
 	} else {
 		fp.UserAgent = profile.UserAgent
@@ -268,8 +305,9 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header, plat
 // OS/Arch/Prompt* 始终重置回 bucket 平台对应的 canonical profile，不随客户端漂移。
 func mergeHeadersIntoFingerprint(fp *Fingerprint, headers http.Header, platform string) {
 	profile := platformProfile(platform)
-	// User-Agent：版本升级的触发条件，一定存在
-	if ua := headers.Get("User-Agent"); ua != "" {
+	// User-Agent：版本升级的触发条件，一定存在。
+	// 同 createFingerprintFromHeaders：family 后缀归一化为 canonicalCLIUASuffix。
+	if ua := normalizeCLIUA(headers.Get("User-Agent")); ua != "" {
 		fp.UserAgent = ua
 	}
 	// X-Stainless-* headers: update only when present in the request, otherwise
