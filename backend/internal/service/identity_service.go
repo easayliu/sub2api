@@ -369,9 +369,10 @@ func (s *IdentityService) ApplyFingerprint(req *http.Request, fp *Fingerprint) {
 
 // ApplyOSFingerprint overwrites only X-Stainless-OS and X-Stainless-Arch,
 // leaving UA / Runtime / PackageVersion untouched. Used on the real-Claude-
-// Code-CLI passthrough path where UA / cc_version must stay verbatim but
-// OS / Arch still need to match the locked Mac profile so they stay in sync
-// with the rewritten system-prompt env block.
+// Code-CLI passthrough path where Runtime/PackageVersion must stay verbatim
+// (per-client diversity is fine for those) but OS / Arch still need to
+// match the locked platform profile so they stay in sync with the rewritten
+// system-prompt env block.
 func (s *IdentityService) ApplyOSFingerprint(req *http.Request, fp *Fingerprint) {
 	if fp == nil {
 		return
@@ -381,6 +382,23 @@ func (s *IdentityService) ApplyOSFingerprint(req *http.Request, fp *Fingerprint)
 	}
 	if fp.StainlessArch != "" {
 		setHeaderRaw(req.Header, "X-Stainless-Arch", fp.StainlessArch)
+	}
+}
+
+// ApplyUAFingerprint overwrites only the User-Agent header from the cached
+// fingerprint. Used on the real-Claude-Code-CLI passthrough path together
+// with ApplyOSFingerprint to enforce per-account CLI version stickiness:
+// once an account's fingerprint observes the latest CLI version (via
+// isNewerVersion monotonic upgrade), every subsequent request for that
+// account goes upstream with the locked UA, so Anthropic only ever sees
+// one CLI version per account at a time instead of the multi-version mix
+// that arises when many users share a single OAuth credential.
+func (s *IdentityService) ApplyUAFingerprint(req *http.Request, fp *Fingerprint) {
+	if fp == nil {
+		return
+	}
+	if fp.UserAgent != "" {
+		setHeaderRaw(req.Header, "User-Agent", fp.UserAgent)
 	}
 }
 

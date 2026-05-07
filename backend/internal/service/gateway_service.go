@@ -6284,15 +6284,16 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// Sync billing-header cc_version with the UA we will actually send.
-	// Real Claude Code CLI traffic is passed through verbatim (no rewrite) —
-	// whatever cc_version the client sent stays. Only mimic clients need
-	// synthesis against the pinned canonical UA, and non-OAuth API-key
-	// traffic falls back to the cached fingerprint UA.
+	// Mimic uses the canonical UA (locked to the prompt-template version we
+	// fully replicate). Real Claude Code CLI passthrough and non-OAuth
+	// API-key traffic both use the per-account cached fingerprint UA so the
+	// outgoing cc_version in body stays in lockstep with the UA header that
+	// ApplyUAFingerprint / ApplyFingerprint will write below.
 	syncUA := ""
 	switch {
 	case mimicClaudeCode:
 		syncUA = claude.DefaultHeaders["User-Agent"]
-	case tokenType != "oauth" && fingerprint != nil:
+	case fingerprint != nil:
 		syncUA = fingerprint.UserAgent
 	}
 	if syncUA != "" {
@@ -6331,15 +6332,15 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// OAuth账号：应用缓存的指纹到请求头（覆盖白名单透传的头）。
-	// 真 Claude Code CLI 直接透传：客户端已发出规范头，不用缓存指纹覆盖；
-	// 仅 mimic 客户端或非 OAuth 路径需要应用指纹。
+	// Mimic / 非 OAuth 路径：覆盖整套指纹（UA + Stainless 全套）。
+	// 真 Claude Code CLI passthrough：仅覆盖 UA（账号级版本锁，跟随 fp.UserAgent
+	// 的 isNewerVersion 单调升级）+ X-Stainless-OS/Arch（与 env block 平台一致），
+	// Runtime / Lang / PackageVersion 保留客户端原值，避免吞掉真实 SDK 多样性。
 	if fingerprint != nil && (mimicClaudeCode || tokenType != "oauth") {
 		s.identityService.ApplyFingerprint(req, fingerprint)
 	} else if fingerprint != nil && enableFP {
-		// Real Claude Code CLI passthrough path: keep UA / cc_version verbatim
-		// but still overwrite X-Stainless-OS/Arch so they match the locked Mac
-		// profile used in the rewritten system-prompt env block.
 		s.identityService.ApplyOSFingerprint(req, fingerprint)
+		s.identityService.ApplyUAFingerprint(req, fingerprint)
 	}
 
 	// 确保必要的headers存在（保持原始大小写）
