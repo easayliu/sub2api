@@ -143,6 +143,15 @@ const formatSystemLogDetail = (row: OpsSystemLog) => {
   if (row.model) corrParts.push(`model=${row.model}`)
   if (corrParts.length > 0) parts.push(corrParts.join(' '))
 
+  // UA 对照：客户端原始 UA vs 网关重写后送上游的 UA。
+  // 当 client/upstream 不一致时说明触发了 family 归一化或账号版本锁。
+  const clientUA = getExtraString(extra, 'client_user_agent')
+  const upstreamUA = getExtraString(extra, 'upstream_user_agent')
+  const uaParts: string[] = []
+  if (clientUA) uaParts.push(`client_ua=${clientUA}`)
+  if (upstreamUA && upstreamUA !== clientUA) uaParts.push(`upstream_ua=${upstreamUA}`)
+  if (uaParts.length > 0) parts.push(uaParts.join(' '))
+
   const errors = getExtraString(extra, 'errors')
   if (errors) parts.push(`errors=${errors}`)
   const err = getExtraString(extra, 'err') || getExtraString(extra, 'error')
