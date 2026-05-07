@@ -36,6 +36,8 @@ func Logger() gin.HandlerFunc {
 		accountID, hasAccountID := c.Request.Context().Value(ctxkey.AccountID).(int64)
 		platform, _ := c.Request.Context().Value(ctxkey.Platform).(string)
 		model, _ := c.Request.Context().Value(ctxkey.Model).(string)
+		clientUA := c.Request.Header.Get("User-Agent")
+		upstreamUA, _ := c.Request.Context().Value(ctxkey.UpstreamUserAgent).(string)
 
 		fields := []zap.Field{
 			zap.String("component", "http.access"),
@@ -54,6 +56,16 @@ func Logger() gin.HandlerFunc {
 		}
 		if model != "" {
 			fields = append(fields, zap.String("model", model))
+		}
+		if clientUA != "" {
+			fields = append(fields, zap.String("client_user_agent", clientUA))
+		}
+		// upstream_user_agent is only present for requests that reached the
+		// gateway path (buildUpstreamRequest stashes it into ctx). Requests
+		// that fail earlier — auth reject, validator reject, 404 — won't
+		// carry this field, which itself signals "never reached upstream".
+		if upstreamUA != "" {
+			fields = append(fields, zap.String("upstream_user_agent", upstreamUA))
 		}
 
 		l := logger.FromContext(c.Request.Context()).With(fields...)

@@ -6473,6 +6473,16 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		logClaudeMimicDebug(req, body, account, tokenType, mimicClaudeCode)
 	}
 
+	// Stash the final upstream User-Agent into gin request context so the
+	// access-log middleware can record it alongside the client-supplied UA.
+	// This makes per-request UA normalisation observable without enabling the
+	// debug snapshot logger.
+	if c != nil && c.Request != nil {
+		if upstreamUA := getHeaderRaw(req.Header, "User-Agent"); upstreamUA != "" {
+			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.UpstreamUserAgent, upstreamUA))
+		}
+	}
+
 	return req, nil
 }
 

@@ -180,6 +180,83 @@ func TestLogger_AccessLogIncludesCoreFields(t *testing.T) {
 	}
 }
 
+func TestLogger_AccessLogIncludesClientAndUpstreamUserAgent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := initMiddlewareTestLogger(t)
+
+	r := gin.New()
+	r.Use(Logger())
+	r.Use(func(c *gin.Context) {
+		ctx := context.WithValue(c.Request.Context(), ctxkey.UpstreamUserAgent, "claude-cli/2.1.131 (external, cli)")
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	})
+	r.POST("/v1/messages", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("User-Agent", "claude-cli/2.1.109 (external, sdk-cli)")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+
+	events := sink.list()
+	found := false
+	for _, event := range events {
+		if event == nil || event.Message != "http request completed" {
+			continue
+		}
+		found = true
+		if event.Fields["client_user_agent"] != "claude-cli/2.1.109 (external, sdk-cli)" {
+			t.Fatalf("client_user_agent mismatch: %v", event.Fields["client_user_agent"])
+		}
+		if event.Fields["upstream_user_agent"] != "claude-cli/2.1.131 (external, cli)" {
+			t.Fatalf("upstream_user_agent mismatch: %v", event.Fields["upstream_user_agent"])
+		}
+	}
+	if !found {
+		t.Fatalf("access log event not found")
+	}
+}
+
+func TestLogger_AccessLogOmitsUpstreamUserAgentWhenAbsent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := initMiddlewareTestLogger(t)
+
+	r := gin.New()
+	r.Use(Logger())
+	r.GET("/api/test", func(c *gin.Context) {
+		c.Status(http.StatusUnauthorized)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	req.Header.Set("User-Agent", "claude-cli/2.1.131 (external, cli)")
+	r.ServeHTTP(w, req)
+
+	events := sink.list()
+	found := false
+	for _, event := range events {
+		if event == nil || event.Message != "http request completed" {
+			continue
+		}
+		found = true
+		if event.Fields["client_user_agent"] != "claude-cli/2.1.131 (external, cli)" {
+			t.Fatalf("client_user_agent mismatch: %v", event.Fields["client_user_agent"])
+		}
+		if _, present := event.Fields["upstream_user_agent"]; present {
+			t.Fatalf("upstream_user_agent should be absent when buildUpstreamRequest never ran, got %v",
+				event.Fields["upstream_user_agent"])
+		}
+	}
+	if !found {
+		t.Fatalf("access log event not found")
+	}
+}
+
 func TestLogger_HealthPathSkipped(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	sink := initMiddlewareTestLogger(t)

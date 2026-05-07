@@ -55,4 +55,11 @@ const (
 
 	// ClaudeCodeVersion stores the extracted Claude Code version from User-Agent (e.g. "2.1.22")
 	ClaudeCodeVersion Key = "ctx_claude_code_version"
+
+	// UpstreamUserAgent stores the User-Agent header value the gateway
+	// actually sent upstream after fingerprint normalization / version lock /
+	// mimic rewrites. Set inside buildUpstreamRequest so the access-log
+	// middleware can record both the client-supplied UA and the rewritten
+	// upstream UA for per-request diagnosis.
+	UpstreamUserAgent Key = "ctx_upstream_user_agent"
 )
