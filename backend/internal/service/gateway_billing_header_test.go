@@ -269,6 +269,79 @@ func TestResetBillingHeaderCCH(t *testing.T) {
 	})
 }
 
+func TestNormalizeBillingHeaderEntrypoint(t *testing.T) {
+	t.Run("cli stays cli - no-op", func(t *testing.T) {
+		body := `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.123.d8c; cc_entrypoint=cli; cch=00000;"}],"messages":[]}`
+		result := normalizeBillingHeaderEntrypoint([]byte(body))
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("rewrites sdk entrypoint to cli", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.123.d8c; cc_entrypoint=claude_code_sdk_python; cch=00000;"}],"messages":[]}`)
+		result := normalizeBillingHeaderEntrypoint(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.Contains(t, billingText, "cc_entrypoint=cli;")
+		assert.NotContains(t, billingText, "claude_code_sdk_python")
+	})
+
+	t.Run("rewrites hyphenated value to cli", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.123.d8c; cc_entrypoint=vscode-ext; cch=00000;"}],"messages":[]}`)
+		result := normalizeBillingHeaderEntrypoint(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.Contains(t, billingText, "cc_entrypoint=cli;")
+		assert.NotContains(t, billingText, "vscode-ext")
+	})
+
+	t.Run("preserves cc_version and cch around rewrite", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.110.610; cc_entrypoint=external; cch=a1b2c;"}],"messages":[]}`)
+		result := normalizeBillingHeaderEntrypoint(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.Contains(t, billingText, "cc_version=2.1.110.610")
+		assert.Contains(t, billingText, "cc_entrypoint=cli;")
+		assert.Contains(t, billingText, "cch=a1b2c;")
+	})
+
+	t.Run("no billing header - body unchanged", func(t *testing.T) {
+		body := `{"system":[{"type":"text","text":"You are Claude Code."}],"messages":[]}`
+		result := normalizeBillingHeaderEntrypoint([]byte(body))
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("no system field - body unchanged", func(t *testing.T) {
+		body := `{"messages":[]}`
+		result := normalizeBillingHeaderEntrypoint([]byte(body))
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("system as string - body unchanged", func(t *testing.T) {
+		body := `{"system":"You are Claude.","messages":[]}`
+		result := normalizeBillingHeaderEntrypoint([]byte(body))
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("cc_entrypoint in user content is not touched", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.123.d8c; cc_entrypoint=external; cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"keep literal cc_entrypoint=other; in this message"}]}]}`)
+		result := normalizeBillingHeaderEntrypoint(body)
+		billingText := gjson.GetBytes(result, "system.0.text").String()
+		assert.Contains(t, billingText, "cc_entrypoint=cli;")
+		userText := gjson.GetBytes(result, "messages.0.content.0.text").String()
+		assert.Contains(t, userText, "cc_entrypoint=other;")
+	})
+
+	t.Run("missing cc_entrypoint - body unchanged", func(t *testing.T) {
+		body := `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.123.d8c; cch=00000;"}],"messages":[]}`
+		result := normalizeBillingHeaderEntrypoint([]byte(body))
+		assert.Equal(t, body, string(result))
+	})
+
+	t.Run("idempotent across two calls", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.123.d8c; cc_entrypoint=claude_code_sdk_typescript; cch=00000;"}],"messages":[]}`)
+		first := normalizeBillingHeaderEntrypoint(body)
+		second := normalizeBillingHeaderEntrypoint(first)
+		assert.Equal(t, string(first), string(second))
+	})
+}
+
 func TestXXHash64Seeded(t *testing.T) {
 	t.Run("matches cespare/xxhash for seed 0", func(t *testing.T) {
 		inputs := []string{"", "a", "hello world", "The quick brown fox jumps over the lazy dog"}

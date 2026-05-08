@@ -24,6 +24,10 @@ const billingHeaderSuffixSalt = "59cf53e54c78"
 // first user message text used as input to the cc_version suffix hash.
 var billingHeaderSuffixPositions = [...]int{4, 7, 20}
 
+// ccEntrypointRe matches cc_entrypoint=<value> inside an x-anthropic-billing-header
+// text block. Scoped to the header prefix to avoid touching user content.
+var ccEntrypointRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcc_entrypoint=)([A-Za-z0-9_-]+)(\s*;)`)
+
 // cchPlaceholderRe matches the cch=00000 placeholder in billing header text,
 // scoped to x-anthropic-billing-header to avoid touching user content.
 var cchPlaceholderRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcch=)(00000)(;)`)
@@ -124,6 +128,36 @@ func syncBillingHeaderVersion(body []byte, userAgent string) []byte {
 		if text.Exists() && text.Type == gjson.String &&
 			strings.HasPrefix(text.String(), "x-anthropic-billing-header") {
 			newText := ccVersionWithSuffixRe.ReplaceAllString(text.String(), replacement)
+			if newText != text.String() {
+				if updated, err := sjson.SetBytes(body, fmt.Sprintf("system.%d.text", idx), newText); err == nil {
+					body = updated
+				}
+			}
+		}
+		idx++
+		return true
+	})
+
+	return body
+}
+
+// normalizeBillingHeaderEntrypoint forces cc_entrypoint to "cli" in any
+// x-anthropic-billing-header system text block. Used for OAuth-bound traffic
+// to keep a consistent entrypoint fingerprint across mimic and real-CLI
+// passthrough paths, since mixed values (e.g. claude_code_sdk_python,
+// vscode-ext) under the same device_id widen the upstream picture surface.
+func normalizeBillingHeaderEntrypoint(body []byte) []byte {
+	systemResult := gjson.GetBytes(body, "system")
+	if !systemResult.Exists() || !systemResult.IsArray() {
+		return body
+	}
+
+	idx := 0
+	systemResult.ForEach(func(_, item gjson.Result) bool {
+		text := item.Get("text")
+		if text.Exists() && text.Type == gjson.String &&
+			strings.HasPrefix(text.String(), "x-anthropic-billing-header") {
+			newText := ccEntrypointRe.ReplaceAllString(text.String(), "${1}cli${3}")
 			if newText != text.String() {
 				if updated, err := sjson.SetBytes(body, fmt.Sprintf("system.%d.text", idx), newText); err == nil {
 					body = updated

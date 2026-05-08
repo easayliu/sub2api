@@ -6460,6 +6460,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	if syncUA != "" {
 		body = syncBillingHeaderVersion(body, syncUA)
 	}
+	// Normalize cc_entrypoint to "cli" for OAuth traffic so mimic and real-CLI
+	// passthrough share a single entrypoint value upstream. Run before CCH
+	// signing so the final body (including the rewritten entrypoint) is what
+	// gets hashed.
+	if account.IsOAuth() {
+		body = normalizeBillingHeaderEntrypoint(body)
+	}
 	// CCH 签名：启用时对 body 计算 xxHash64 签名替换占位符；
 	// 关闭时强制把任意 cch=xxxxx 重置回 cch=00000（真 CLI 带来的真实签名也会被清掉），
 	// 以便上游始终收到统一的占位符。
@@ -9417,6 +9424,12 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	// mimic 客户端沿用指纹 UA 做同步。
 	if ctFingerprint != nil && ctEnableFP && mimicClaudeCode {
 		body = syncBillingHeaderVersion(body, ctFingerprint.UserAgent)
+	}
+	// Normalize cc_entrypoint to "cli" for OAuth traffic so mimic and real-CLI
+	// passthrough share a single entrypoint value upstream. Run before CCH
+	// signing so the final body is what gets hashed.
+	if account.IsOAuth() {
+		body = normalizeBillingHeaderEntrypoint(body)
 	}
 	if ctEnableCCH {
 		body = signBillingHeaderCCH(body)
