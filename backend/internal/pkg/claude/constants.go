@@ -1,6 +1,8 @@
 // Package claude provides constants and helpers for Claude API integration.
 package claude
 
+import "strings"
+
 // Claude Code 客户端相关常量
 
 // Beta header 常量
@@ -22,18 +24,26 @@ const (
 	BetaRedactThinking     = "redact-thinking-2026-02-12"
 	BetaContextManagement  = "context-management-2025-06-27"
 	BetaPromptCachingScope = "prompt-caching-scope-2026-01-05"
+	// Claude CLI 2.1.133 OAuth-mode unconditional beta across all model tiers
+	// (haiku/sonnet/opus). CLI omits this token in API-key mode; sub2api
+	// forwards API-key traffic upstream via OAuth, so the token must be
+	// injected to avoid an OAuth-without-extended-cache-ttl fingerprint
+	// mismatch. Verified in capture/0508 003/012/019.
+	BetaExtendedCacheTTL = "extended-cache-ttl-2025-04-11"
 )
 
 // DroppedBetas 是转发时需要从 anthropic-beta header 中移除的 beta token 列表。
 // 这些 token 是客户端特有的，不应透传给上游 API。
 var DroppedBetas = []string{}
 
-// DefaultBetaHeader Claude Code 客户端默认的 anthropic-beta header
-// Aligned with CLI 2.1.123 baseline: drops fine-grained-tool-streaming (no longer
-// emitted by CLI) and adds the redact-thinking / context-management / prompt-caching-scope
-// tokens CLI now sends on every /v1/messages call.
+// DefaultBetaHeader Claude Code 客户端默认的 anthropic-beta header.
+// Aligned with CLI 2.1.133 sonnet OAuth baseline (capture/0508/012):
+// claude-code, oauth, interleaved-thinking, redact-thinking, context-management,
+// prompt-caching-scope, advanced-tool-use, effort, extended-cache-ttl.
+// context-1m-2025-08-07 is opus-only and intentionally absent here.
 const DefaultBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," +
-	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope
+	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope + "," +
+	BetaAdvancedToolUse + "," + BetaEffort + "," + BetaExtendedCacheTTL
 
 // MessageBetaHeaderNoTools /v1/messages 在无工具时的 beta header
 //
@@ -41,22 +51,24 @@ const DefaultBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleav
 // Claude Code for non-Claude-Code clients, we must include the claude-code beta
 // even if the request doesn't use tools, otherwise upstream may reject the
 // request as a non-Claude-Code API request.
-const MessageBetaHeaderNoTools = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," +
-	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope
+const MessageBetaHeaderNoTools = DefaultBetaHeader
 
 // MessageBetaHeaderWithTools /v1/messages 在有工具时的 beta header
-const MessageBetaHeaderWithTools = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," +
-	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope
+const MessageBetaHeaderWithTools = DefaultBetaHeader
 
 // CountTokensBetaHeader count_tokens 请求使用的 anthropic-beta header
 const CountTokensBetaHeader = BetaClaudeCode + "," + BetaOAuth + "," + BetaInterleavedThinking + "," + BetaTokenCounting
 
-// HaikuBetaHeader Haiku 模型使用的 anthropic-beta header（不需要 claude-code beta）
-// CLI 2.1.123 haiku traffic always carries the redact-thinking / context-management /
-// prompt-caching-scope trio; claude-code beta is optional (sometimes present on
-// agentic haiku calls, absent on quota/title-gen calls).
+// HaikuBetaHeader Haiku 模型使用的 anthropic-beta header.
+// Aligned with CLI 2.1.133 haiku OAuth baseline (capture/0508/019):
+// oauth, interleaved-thinking, redact-thinking, context-management,
+// prompt-caching-scope, claude-code, extended-cache-ttl.
+// Note the unusual claude-code position (between pcs and ect) — haiku and
+// non-haiku tiers use different wire orderings; both are part of the
+// fingerprint and must be preserved.
 const HaikuBetaHeader = BetaOAuth + "," + BetaInterleavedThinking + "," +
-	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope
+	BetaRedactThinking + "," + BetaContextManagement + "," + BetaPromptCachingScope + "," +
+	BetaClaudeCode + "," + BetaExtendedCacheTTL
 
 // APIKeyBetaHeader API-key 账号建议使用的 anthropic-beta header（不包含 oauth）
 const APIKeyBetaHeader = BetaClaudeCode + "," + BetaInterleavedThinking + "," + BetaFineGrainedToolStreaming
@@ -68,8 +80,8 @@ const APIKeyHaikuBetaHeader = BetaInterleavedThinking
 var DefaultHeaders = map[string]string{
 	// Keep these in sync with recent Claude CLI traffic to reduce the chance
 	// that Claude Code-scoped OAuth credentials are rejected as "non-CLI" usage.
-	// Reference: capture/2.1.123/003_161822_..._v1_messages?beta=true.json.
-	"User-Agent":                                "claude-cli/2.1.123 (external, cli)",
+	// Reference: capture/0508/003_100543_..._v1_messages?beta=true.json (CLI 2.1.133).
+	"User-Agent":                                "claude-cli/2.1.133 (external, cli)",
 	"X-Stainless-Lang":                          "js",
 	"X-Stainless-Package-Version":               "0.81.0",
 	"X-Stainless-OS":                            "MacOS",
@@ -176,4 +188,59 @@ func DenormalizeModelID(id string) string {
 		return mapped
 	}
 	return id
+}
+
+// OAuthMessagesRequiredBetas returns the canonical anthropic-beta token list
+// that real Claude Code CLI 2.1.133 emits in OAuth mode for /v1/messages, in
+// wire order. Per-tier orderings differ and the order itself is part of the
+// upstream fingerprint, so callers should pass the exact result to a merge
+// helper that preserves order.
+//
+// Tier rules (verified against capture/0508 003/012/019):
+//   - haiku  (7 tokens): oauth, ithink, redact, cmgmt, pcs, claude-code, ect
+//   - sonnet (9 tokens): claude-code, oauth, ithink, redact, cmgmt, pcs, atu, effort, ect
+//   - opus  (10 tokens): claude-code, oauth, c1m, ithink, redact, cmgmt, pcs, atu, effort, ect
+//
+// Unknown model IDs default to the sonnet shape — closest match to a generic
+// non-haiku, non-opus message and the safest fallback for older or short-name
+// model IDs that slipped past NormalizeModelID.
+func OAuthMessagesRequiredBetas(modelID string) []string {
+	m := strings.ToLower(modelID)
+	switch {
+	case strings.Contains(m, "haiku"):
+		return []string{
+			BetaOAuth,
+			BetaInterleavedThinking,
+			BetaRedactThinking,
+			BetaContextManagement,
+			BetaPromptCachingScope,
+			BetaClaudeCode,
+			BetaExtendedCacheTTL,
+		}
+	case strings.Contains(m, "opus"):
+		return []string{
+			BetaClaudeCode,
+			BetaOAuth,
+			BetaContext1M,
+			BetaInterleavedThinking,
+			BetaRedactThinking,
+			BetaContextManagement,
+			BetaPromptCachingScope,
+			BetaAdvancedToolUse,
+			BetaEffort,
+			BetaExtendedCacheTTL,
+		}
+	default:
+		return []string{
+			BetaClaudeCode,
+			BetaOAuth,
+			BetaInterleavedThinking,
+			BetaRedactThinking,
+			BetaContextManagement,
+			BetaPromptCachingScope,
+			BetaAdvancedToolUse,
+			BetaEffort,
+			BetaExtendedCacheTTL,
+		}
+	}
 }

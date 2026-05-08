@@ -4530,6 +4530,161 @@ func enforceCacheControlLimit(body []byte) []byte {
 	return body
 }
 
+// splitMergedSystemForOAuth restores the 4-block CLI 2.1.133 OAuth-mode system[]
+// shape when the upstream OAuth request was triggered by a real Claude Code
+// client running in API-key mode. In that mode the CLI emits a 3-block system[]
+// where sys[2] merges the canonical 9925-byte agent-instructions template and
+// the trailing environment / text-output content; sub2api forwards via OAuth so
+// the merged shape would land at Anthropic alongside an OAuth Authorization
+// even though direct CLI OAuth traffic always sends the unmerged 4-block shape.
+//
+// The function is a no-op when:
+//   - system is not exactly 3 entries (already 4-block, or non-CLI shape)
+//   - sys[1] is not the literal Claude Code identity banner
+//   - sys[2] does not contain the canonical "\n\n# Text output (does not apply
+//     to tool calls)\n" boundary marker at offset 9925
+//
+// All three checks are conservative: a custom system prompt or a future CLI
+// revision with a different agent-template length is left untouched rather
+// than risking a wrong split.
+//
+// Verified against capture/0508 003/006 (opus), 012/015 (sonnet), 019/016
+// (haiku): the first 9925 bytes of API-key sys[2] are byte-identical to the
+// sub-mode sys[2] across all tiers, so splitting at the boundary reconstructs
+// the sub-mode wire shape without needing an embedded reference template.
+func splitMergedSystemForOAuth(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	system := gjson.GetBytes(body, "system")
+	if !system.IsArray() {
+		return body
+	}
+	arr := system.Array()
+	if len(arr) != 3 {
+		return body
+	}
+	sys1Text := arr[1].Get("text").String()
+	if strings.TrimSpace(sys1Text) != strings.TrimSpace(claudeCodeSystemPrompt) {
+		return body
+	}
+	sys2Text := arr[2].Get("text").String()
+	const boundaryMarker = "\n\n# Text output (does not apply to tool calls)\n"
+	const expectedAgentLen = 9925
+	boundaryIdx := strings.Index(sys2Text, boundaryMarker)
+	if boundaryIdx != expectedAgentLen {
+		return body
+	}
+
+	agentText := sys2Text[:boundaryIdx]
+	trailingText := sys2Text[boundaryIdx+2:] // skip the "\n\n" glue, keep "# Text output..." onward
+
+	out := body
+	if next, ok := deleteJSONPathBytes(out, "system.1.cache_control"); ok {
+		out = next
+	}
+	if next, ok := setJSONValueBytes(out, "system.2.text", agentText); ok {
+		out = next
+	}
+	if next, ok := setJSONValueBytes(out, "system.2.cache_control", anthropicCacheControlPayload{
+		Type:  "ephemeral",
+		TTL:   "1h",
+		Scope: "global",
+	}); ok {
+		out = next
+	}
+	sys3 := anthropicSystemTextBlockPayload{
+		Type: "text",
+		Text: trailingText,
+		CacheControl: &anthropicCacheControlPayload{
+			Type: "ephemeral",
+			TTL:  "1h",
+		},
+	}
+	if next, ok := setJSONValueBytes(out, "system.3", sys3); ok {
+		out = next
+	}
+	return out
+}
+
+// userContextReminderPrefix is the exact opening of the per-request context
+// system-reminder that CLI 2.1.133 emits at the end of the first user message's
+// content[]. We match on the literal prefix because the block has a fixed wire
+// shape; matching loosely risks rewriting unrelated reminders.
+const userContextReminderPrefix = "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n"
+
+// userContextDateSlashRe matches the YYYY/MM/DD date format API-key-mode CLI
+// emits in the # currentDate block. OAuth-mode CLI uses YYYY-MM-DD, so we
+// rewrite slash to dash to match the sub-mode wire shape.
+var userContextDateSlashRe = regexp.MustCompile(`Today's date is (\d{4})/(\d{2})/(\d{2})\.`)
+
+// alignUserContextSystemReminder rewrites the per-request context
+// system-reminder block in messages[0].content[] to match the CLI 2.1.133
+// OAuth-mode shape:
+//
+//   - Inject "# userEmail\nThe user's email address is X.\n" before # currentDate
+//     when missing. API-key-mode CLI omits this section because it has no OAuth
+//     scope to know the account email; sub2api knows it via Account.Extra and
+//     can fill it back in.
+//   - Normalize "Today's date is YYYY/MM/DD." to "Today's date is YYYY-MM-DD."
+//     CLI uses dash separators in OAuth mode and slash separators in API-key
+//     mode; only the dash form matches direct-CLI sub captures.
+//
+// Verified against capture/0508 003 (sub) vs 006 (key).
+//
+// No-op when:
+//   - account is nil or Account.Extra["email_address"] is empty (we only inject
+//     what we actually know — never fabricate)
+//   - the block already contains "# userEmail" (real CLI OAuth traffic that we
+//     should not double-edit)
+//   - no content block matches userContextReminderPrefix (non-CLI client or
+//     unexpected message shape)
+func alignUserContextSystemReminder(body []byte, account *Account) []byte {
+	if len(body) == 0 || account == nil {
+		return body
+	}
+	email := strings.TrimSpace(account.GetExtraString("email_address"))
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+	out := body
+	msgIdx := 0
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		curMsg := msgIdx
+		msgIdx++
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		contentIdx := 0
+		content.ForEach(func(_, part gjson.Result) bool {
+			curPart := contentIdx
+			contentIdx++
+			text := part.Get("text").String()
+			if !strings.HasPrefix(text, userContextReminderPrefix) {
+				return true
+			}
+			newText := text
+			if email != "" && !strings.Contains(newText, "# userEmail") {
+				if idx := strings.Index(newText, "# currentDate"); idx > 0 {
+					inject := "# userEmail\nThe user's email address is " + email + ".\n"
+					newText = newText[:idx] + inject + newText[idx:]
+				}
+			}
+			newText = userContextDateSlashRe.ReplaceAllString(newText, "Today's date is $1-$2-$3.")
+			if newText != text {
+				if next, ok := setJSONValueBytes(out, fmt.Sprintf("messages.%d.content.%d.text", curMsg, curPart), newText); ok {
+					out = next
+				}
+			}
+			return true
+		})
+		return true
+	})
+	return out
+}
+
 // upgradeCLICacheTTL aligns apiurl-routed CLI traffic with direct-to-Anthropic CLI
 // traffic: the CLI silently downgrades cache_control to a bare {type:"ephemeral"}
 // (5m default) when the endpoint isn't api.anthropic.com, so we upgrade those
@@ -4695,12 +4850,18 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		body = mimicCLIBodyFields(body, reqModel)
 	}
 
-	// Align cache_control ttl with direct-CLI traffic. CLI 2.1.123 downgrades
-	// to bare {type:"ephemeral"} when routing through a non-Anthropic endpoint;
-	// upgrade back to ttl:"1h" (+ scope:"global" on the agent-instructions block)
-	// so OAuth accounts see the same cache behavior regardless of endpoint.
-	// Covers both real Claude Code and mimic clients since both downgrade.
+	// Align system[] structure and cache_control with direct-CLI OAuth traffic.
+	// Two-step process for OAuth accounts:
+	//   1. splitMergedSystemForOAuth: when the body is in API-key-mode 3-block
+	//      shape (real CLI passthrough), split sys[2] back into sys[2]+sys[3]
+	//      so the upstream wire matches CLI 2.1.133 OAuth captures byte-for-byte.
+	//   2. upgradeCLICacheTTL: catch any remaining bare {type:"ephemeral"} blocks
+	//      (4-block bodies that still downgraded ttl, mimic flow leftovers, etc.)
+	//      and lift them to ttl:"1h" with scope:"global" on the agent-instructions
+	//      block.
 	if account.IsOAuth() {
+		body = splitMergedSystemForOAuth(body)
+		body = alignUserContextSystemReminder(body, account)
 		body = upgradeCLICacheTTL(body)
 	}
 
@@ -6373,51 +6534,20 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			// - 强制 Claude Code 指纹相关请求头（尤其是 user-agent/x-stainless/x-app）
 			// - 保留 incoming beta 的同时，确保 OAuth 所需 beta 存在
 			applyClaudeCodeMimicHeaders(req, reqStream)
-
-			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
-			// Claude Code OAuth credentials are scoped to Claude Code.
-			// Non-haiku models MUST include claude-code beta for Anthropic to recognize
-			// this as a legitimate Claude Code request; without it, the request is
-			// rejected as third-party ("out of extra usage").
-			// Haiku models are exempt from third-party detection and don't need it.
-			// CLI 2.1.123 sends these on every /v1/messages call regardless of model;
-			// keep them required so apiurl traffic matches direct-CLI baseline.
-			requiredBetas := []string{
-				claude.BetaOAuth,
-				claude.BetaInterleavedThinking,
-				claude.BetaRedactThinking,
-				claude.BetaContextManagement,
-				claude.BetaPromptCachingScope,
-			}
-			if !strings.Contains(strings.ToLower(modelID), "haiku") {
-				// Order matches CLI 2.1.123 direct-to-Anthropic captures exactly:
-				// claude-code, oauth, context-1m, interleaved-thinking, redact-thinking,
-				// context-management, prompt-caching-scope, advanced-tool-use, effort.
-				// Token order is part of the wire fingerprint.
-				// Note: advisor-tool-2026-03-01 (carried by CLI 2.1.110) is no longer
-				// emitted unconditionally as of 2.1.123; do not include it here.
-				requiredBetas = []string{
-					claude.BetaClaudeCode,
-					claude.BetaOAuth,
-					claude.BetaContext1M,
-					claude.BetaInterleavedThinking,
-					claude.BetaRedactThinking,
-					claude.BetaContextManagement,
-					claude.BetaPromptCachingScope,
-					claude.BetaAdvancedToolUse,
-					claude.BetaEffort,
-				}
-			}
-			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
-		} else {
-			// Real Claude Code CLI passthrough: keep client wire intact.
-			// Only ensure oauth-2025-04-20 is present (required for OAuth scope
-			// recognition); injecting any other tokens produces combinations
-			// that no genuine CLI version emits, which is itself a fingerprint.
-			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
-			clientBetaHeader = ensureOAuthBeta(clientBetaHeader)
-			setHeaderRaw(req.Header, "anthropic-beta", stripBetaTokensWithSet(clientBetaHeader, effectiveDropSet))
 		}
+		// Both mimic clients and real-CLI passthrough share the same canonical
+		// OAuth beta token set per model tier. Real CLI in API-key mode emits a
+		// reduced subset (no oauth/advanced-tool-use/effort/extended-cache-ttl);
+		// when sub2api converts that traffic to upstream OAuth, the reduced set
+		// would reach Anthropic alongside an OAuth Authorization, producing an
+		// "OAuth without OAuth-only beta tokens" mismatch that is itself a
+		// high-signal proxy fingerprint. Inject the canonical set in both
+		// branches. See capture/0508 (003 sub vs 006 key) for the diff that
+		// motivated this; OAuthMessagesRequiredBetas encodes the per-tier wire
+		// order observed in CLI 2.1.133 captures.
+		incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
+		requiredBetas := claude.OAuthMessagesRequiredBetas(modelID)
+		setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
 	} else {
 		// API-key accounts: apply beta policy filter to strip controlled tokens
 		if existingBeta := getHeaderRaw(req.Header, "anthropic-beta"); existingBeta != "" {
@@ -6448,9 +6578,16 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	if mimicClaudeCode && getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") == "" {
 		setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", generateRandomUUID())
 	}
-	// Real CLI 2.1.123 emits a fresh x-client-request-id UUID on every request;
-	// mimic traffic must do the same to avoid missing-header fingerprinting.
+	// Real CLI 2.1.133 OAuth mode emits a fresh x-client-request-id UUID on every
+	// request, but in API-key mode the CLI omits the header entirely (verified
+	// in capture/0508 003 vs 006). For mimic traffic we always overwrite to a
+	// fresh value (we control identity); for real-CLI passthrough on an OAuth
+	// upstream, generate one when the client-supplied value is missing so the
+	// API-key→OAuth conversion does not leave Anthropic seeing OAuth scope
+	// without the per-request UUID it expects.
 	if mimicClaudeCode {
+		setHeaderRaw(req.Header, "x-client-request-id", generateRandomUUID())
+	} else if tokenType == "oauth" && getHeaderRaw(req.Header, "x-client-request-id") == "" {
 		setHeaderRaw(req.Header, "x-client-request-id", generateRandomUUID())
 	}
 
