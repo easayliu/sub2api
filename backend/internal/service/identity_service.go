@@ -109,6 +109,8 @@ var platformProfiles = map[string]Fingerprint{
 		StainlessArch:           "arm64",
 		StainlessRuntime:        "node",
 		StainlessRuntimeVersion: "v24.3.0",
+		AcceptEncoding:          "gzip, deflate, br, zstd",
+		StainlessTimeout:        "600",
 		PromptPlatform:          "darwin",
 		PromptOSVersion:         "Darwin 25.3.0",
 		PromptShell:             "zsh",
@@ -121,6 +123,8 @@ var platformProfiles = map[string]Fingerprint{
 		StainlessArch:           "x64",
 		StainlessRuntime:        "node",
 		StainlessRuntimeVersion: "v24.3.0",
+		AcceptEncoding:          "gzip, deflate, br, zstd",
+		StainlessTimeout:        "600",
 		PromptPlatform:          "win32",
 		PromptOSVersion:         "Windows 11 Enterprise 10.0.26200",
 		PromptShell:             "PowerShell (use PowerShell syntax — e.g., $null not /dev/null, $env:VAR not $VAR, backtick for line continuation)",
@@ -133,6 +137,8 @@ var platformProfiles = map[string]Fingerprint{
 		StainlessArch:           "x64",
 		StainlessRuntime:        "node",
 		StainlessRuntimeVersion: "v24.3.0",
+		AcceptEncoding:          "gzip, deflate, br, zstd",
+		StainlessTimeout:        "600",
 		PromptPlatform:          "linux",
 		PromptOSVersion:         "Linux 6.8.0-generic",
 		PromptShell:             "bash",
@@ -165,7 +171,14 @@ func pinnedPlatform() string {
 	return PlatformMacOS
 }
 
-// Fingerprint represents account fingerprint data
+// Fingerprint represents account fingerprint data.
+//
+// UA, StainlessPackageVersion, StainlessRuntimeVersion and AcceptEncoding form
+// a single version-locked tuple: they all originate from the same real CLI
+// request that triggered the current cache record. They must be applied
+// together on passthrough so the upstream view never mixes a newer UA with
+// stale companion fields (e.g. UA=2.1.141 + Runtime=v23.x is an impossible
+// combination upstream can flag as forged).
 type Fingerprint struct {
 	ClientID                string
 	UserAgent               string
@@ -175,13 +188,44 @@ type Fingerprint struct {
 	StainlessArch           string
 	StainlessRuntime        string
 	StainlessRuntimeVersion string
+	// AcceptEncoding pins the Accept-Encoding header to the value the locked
+	// CLI version actually negotiates (Node 24 includes zstd; older runtimes
+	// emit `gzip, compress, deflate, br`). Part of the version-locked tuple.
+	AcceptEncoding string `json:",omitempty"`
+	// StainlessTimeout pins the X-Stainless-Timeout header to the canonical
+	// real-CLI value ("600"). Unlike Package/Runtime-Version this does not
+	// vary across CLI releases, so it is treated as a pinned profile field —
+	// never sourced from the inbound client (custom SDKs commonly send 3000+
+	// which is a hard cluster signal).
+	StainlessTimeout string `json:",omitempty"`
+	// EmitsSessionID records whether this account's CLI version was observed
+	// emitting an X-Claude-Code-Session-Id header. Set on cold-start from the
+	// inbound request and monotonically promoted to true on any subsequent
+	// observation — once a version is known to emit session-id, the gateway
+	// keeps injecting it (sourced from body.metadata.user_id.session_id) so
+	// the upstream view never sees a UA=newer-CLI + missing-session mismatch.
+	EmitsSessionID bool `json:",omitempty"`
 	// PromptPlatform / PromptOSVersion / PromptShell are rewritten into the
 	// Claude Code system prompt env block. They are always the locked Mac
 	// profile values; never sourced from the inbound client.
 	PromptPlatform  string
 	PromptOSVersion string
 	PromptShell     string
-	UpdatedAt       int64 `json:",omitempty"` // Unix timestamp，用于判断是否需要续期TTL
+	// LastUpgrade records the most recent monotonic UA upgrade for this
+	// account. Only the latest event is kept (per design — older upgrades are
+	// not retained). Nil for caches that have never observed an upgrade.
+	LastUpgrade *UpgradeRecord `json:",omitempty"`
+	UpdatedAt   int64          `json:",omitempty"` // Unix timestamp，用于判断是否需要续期TTL
+}
+
+// UpgradeRecord captures a single version-tuple upgrade event: the cached UA
+// before the upgrade, the new UA, and when the upgrade happened. Persisted as
+// `Fingerprint.LastUpgrade` to support post-mortem inspection of version
+// drift without growing the cache record unboundedly.
+type UpgradeRecord struct {
+	FromUA     string `json:"from_ua"`
+	ToUA       string `json:"to_ua"`
+	UpgradedAt int64  `json:"upgraded_at"`
 }
 
 // IdentityCache defines cache operations for identity service. All methods
@@ -233,9 +277,15 @@ func (s *IdentityService) GetOrCreateFingerprint(ctx context.Context, accountID 
 		if clientUA != "" && isNewerVersion(clientUA, cached.UserAgent) {
 			// 版本升级：merge 语义 — 仅更新请求中实际携带的字段，保留缓存值
 			// 避免缺失的头被硬编码默认值覆盖（如新 CLI 版本 + 旧 SDK 默认值的不一致）
+			previousUA := cached.UserAgent
 			mergeHeadersIntoFingerprint(cached, headers, platform)
+			cached.LastUpgrade = &UpgradeRecord{
+				FromUA:     previousUA,
+				ToUA:       cached.UserAgent,
+				UpgradedAt: time.Now().Unix(),
+			}
 			needWrite = true
-			logger.LegacyPrintf("service.identity", "Updated fingerprint for account %d/%s: %s (merge update)", accountID, platform, clientUA)
+			logger.LegacyPrintf("service.identity", "Updated fingerprint for account %d/%s: %s (merge update, from %s)", accountID, platform, clientUA, previousUA)
 		} else if time.Since(time.Unix(cached.UpdatedAt, 0)) > 24*time.Hour {
 			// 距上次写入超过24小时，续期TTL
 			needWrite = true
@@ -291,6 +341,16 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header, plat
 	fp.StainlessArch = profile.StainlessArch
 	fp.StainlessRuntime = getHeaderOrDefault(headers, "X-Stainless-Runtime", profile.StainlessRuntime)
 	fp.StainlessRuntimeVersion = getHeaderOrDefault(headers, "X-Stainless-Runtime-Version", profile.StainlessRuntimeVersion)
+	// Accept-Encoding belongs to the same version tuple — take the client's
+	// header verbatim on cold start so the locked tuple stays self-consistent
+	// with whatever runtime they were actually using.
+	fp.AcceptEncoding = getHeaderOrDefault(headers, "Accept-Encoding", profile.AcceptEncoding)
+	// StainlessTimeout is pinned to the canonical real-CLI value and never
+	// learned from the client (custom SDKs commonly inflate it to 3000+).
+	fp.StainlessTimeout = profile.StainlessTimeout
+	// EmitsSessionID observation: client sent the header on this cold-start
+	// request → treat that CLI version as one that emits session-id.
+	fp.EmitsSessionID = headers.Get("X-Claude-Code-Session-Id") != ""
 
 	// Prompt env fields are pinned to the platform bucket.
 	fp.PromptPlatform = profile.PromptPlatform
@@ -319,6 +379,15 @@ func mergeHeadersIntoFingerprint(fp *Fingerprint, headers http.Header, platform 
 	fp.StainlessArch = profile.StainlessArch
 	mergeHeader(headers, "X-Stainless-Runtime", &fp.StainlessRuntime)
 	mergeHeader(headers, "X-Stainless-Runtime-Version", &fp.StainlessRuntimeVersion)
+	mergeHeader(headers, "Accept-Encoding", &fp.AcceptEncoding)
+	// StainlessTimeout stays pinned to the platform profile across upgrades.
+	fp.StainlessTimeout = profile.StainlessTimeout
+	// EmitsSessionID upgrades monotonically: once any observation sees the
+	// header, the flag stays true. It never goes back to false even if a
+	// later request happens to omit the header (could be a retry/edge case).
+	if !fp.EmitsSessionID && headers.Get("X-Claude-Code-Session-Id") != "" {
+		fp.EmitsSessionID = true
+	}
 
 	// Prompt env fields are immutable per-bucket.
 	fp.PromptPlatform = profile.PromptPlatform
@@ -340,6 +409,10 @@ func applyLockedProfile(fp *Fingerprint, platform string) bool {
 	}
 	if fp.StainlessArch != profile.StainlessArch {
 		fp.StainlessArch = profile.StainlessArch
+		changed = true
+	}
+	if fp.StainlessTimeout != profile.StainlessTimeout {
+		fp.StainlessTimeout = profile.StainlessTimeout
 		changed = true
 	}
 	if fp.PromptPlatform != profile.PromptPlatform {
@@ -403,6 +476,12 @@ func (s *IdentityService) ApplyFingerprint(req *http.Request, fp *Fingerprint) {
 	if fp.StainlessRuntimeVersion != "" {
 		setHeaderRaw(req.Header, "X-Stainless-Runtime-Version", fp.StainlessRuntimeVersion)
 	}
+	if fp.AcceptEncoding != "" {
+		setHeaderRaw(req.Header, "Accept-Encoding", fp.AcceptEncoding)
+	}
+	if fp.StainlessTimeout != "" {
+		setHeaderRaw(req.Header, "X-Stainless-Timeout", fp.StainlessTimeout)
+	}
 }
 
 // ApplyOSFingerprint overwrites only X-Stainless-OS and X-Stainless-Arch,
@@ -423,14 +502,20 @@ func (s *IdentityService) ApplyOSFingerprint(req *http.Request, fp *Fingerprint)
 	}
 }
 
-// ApplyUAFingerprint overwrites only the User-Agent header from the cached
-// fingerprint. Used on the real-Claude-Code-CLI passthrough path together
-// with ApplyOSFingerprint to enforce per-account CLI version stickiness:
-// once an account's fingerprint observes the latest CLI version (via
-// isNewerVersion monotonic upgrade), every subsequent request for that
-// account goes upstream with the locked UA, so Anthropic only ever sees
-// one CLI version per account at a time instead of the multi-version mix
-// that arises when many users share a single OAuth credential.
+// ApplyUAFingerprint overwrites the version-locked header tuple from the
+// cached fingerprint: User-Agent, X-Stainless-Package-Version,
+// X-Stainless-Runtime-Version and Accept-Encoding. Used on the real-Claude-
+// Code-CLI passthrough path together with ApplyOSFingerprint to enforce
+// per-account CLI version stickiness — once an account's fingerprint
+// observes the latest CLI version (via isNewerVersion monotonic upgrade),
+// every subsequent request for that account goes upstream with the entire
+// locked tuple, so Anthropic never sees an internally inconsistent shape
+// like UA=2.1.141 paired with Runtime=v23.x.
+//
+// X-Stainless-Lang and X-Stainless-Runtime are intentionally NOT part of the
+// version-locked tuple — they vary little across CLI versions, so the
+// passthrough whitelist keeps them at the client's actual value to preserve
+// natural per-client diversity.
 func (s *IdentityService) ApplyUAFingerprint(req *http.Request, fp *Fingerprint) {
 	if fp == nil {
 		return
@@ -438,6 +523,47 @@ func (s *IdentityService) ApplyUAFingerprint(req *http.Request, fp *Fingerprint)
 	if fp.UserAgent != "" {
 		setHeaderRaw(req.Header, "User-Agent", fp.UserAgent)
 	}
+	if fp.StainlessPackageVersion != "" {
+		setHeaderRaw(req.Header, "X-Stainless-Package-Version", fp.StainlessPackageVersion)
+	}
+	if fp.StainlessRuntimeVersion != "" {
+		setHeaderRaw(req.Header, "X-Stainless-Runtime-Version", fp.StainlessRuntimeVersion)
+	}
+	if fp.AcceptEncoding != "" {
+		setHeaderRaw(req.Header, "Accept-Encoding", fp.AcceptEncoding)
+	}
+	if fp.StainlessTimeout != "" {
+		setHeaderRaw(req.Header, "X-Stainless-Timeout", fp.StainlessTimeout)
+	}
+}
+
+// ApplySessionIDHeader injects X-Claude-Code-Session-Id derived from the
+// (already-rewritten) request body when the cached fingerprint indicates the
+// locked CLI version emits this header. The session_id is sourced from
+// body.metadata.user_id so the header stays consistent with what the upstream
+// sees in the body — never invent a new id here. No-op when:
+//   - fp is nil or fp.EmitsSessionID is false
+//   - the request already carries the header (whitelist passthrough won)
+//   - body has no parseable metadata.user_id session_id (defensive)
+//
+// Call after ApplyUAFingerprint / ApplyFingerprint and after the body
+// rewriting pipeline so the extracted session_id is the final masked value.
+func (s *IdentityService) ApplySessionIDHeader(req *http.Request, body []byte, fp *Fingerprint) {
+	if fp == nil || !fp.EmitsSessionID {
+		return
+	}
+	if getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") != "" {
+		return
+	}
+	userID := gjson.GetBytes(body, "metadata.user_id").String()
+	if userID == "" {
+		return
+	}
+	parsed := ParseMetadataUserID(userID)
+	if parsed == nil || parsed.SessionID == "" {
+		return
+	}
+	setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
 }
 
 // RewriteEnvSection normalizes the Claude Code system-prompt env block

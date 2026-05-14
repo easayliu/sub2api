@@ -376,7 +376,13 @@ var ErrNoAvailableAccounts = errors.New("no available accounts")
 // ErrClaudeCodeOnly 表示分组仅允许 Claude Code 客户端访问
 var ErrClaudeCodeOnly = errors.New("this group only allows Claude Code clients")
 
-// allowedHeaders 白名单headers（参考CRS项目）
+// allowedHeaders is the forwardable client-header whitelist. Headers absent
+// from this list are dropped before reaching upstream.
+//
+// Notable omissions: `accept-language` and `sec-fetch-*` are deliberately
+// excluded. Real Claude Code CLI (Node + axios) never emits them, so passing
+// them through contradicts the CLI User-Agent and forms a browser-shaped
+// fingerprint signal.
 var allowedHeaders = map[string]bool{
 	"accept":                                    true,
 	"x-stainless-retry-count":                   true,
@@ -392,13 +398,24 @@ var allowedHeaders = map[string]bool{
 	"anthropic-version":                         true,
 	"x-app":                                     true,
 	"anthropic-beta":                            true,
-	"accept-language":                           true,
-	"sec-fetch-mode":                            true,
 	"user-agent":                                true,
 	"content-type":                              true,
 	"accept-encoding":                           true,
 	"x-claude-code-session-id":                  true,
 	"x-client-request-id":                       true,
+}
+
+// isClientHeaderForwardable reports whether a client header may be forwarded
+// upstream. Forwardable requires the header to be on the whitelist AND not
+// carry a `sec-` prefix. The `sec-` denial is a defense-in-depth guard against
+// browser fingerprint headers (`Sec-Fetch-*`, `Sec-CH-UA-*`, etc.) sneaking
+// onto the whitelist later — real CLI traffic never carries them, so dropping
+// them keeps the upstream view consistent with the claimed Node/axios client.
+func isClientHeaderForwardable(lowerKey string) bool {
+	if strings.HasPrefix(lowerKey, "sec-") {
+		return false
+	}
+	return allowedHeaders[lowerKey]
 }
 
 // GatewayCache 定义网关服务的缓存操作接口。
@@ -5635,7 +5652,7 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 	if c != nil && c.Request != nil {
 		for key, values := range c.Request.Header {
 			lowerKey := strings.ToLower(strings.TrimSpace(key))
-			if !allowedHeaders[lowerKey] {
+			if !isClientHeaderForwardable(lowerKey) {
 				continue
 			}
 			wireKey := resolveWireCasing(key)
@@ -6491,7 +6508,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// 白名单透传headers（恢复真实 wire casing）
 	for key, values := range clientHeaders {
 		lowerKey := strings.ToLower(key)
-		if allowedHeaders[lowerKey] {
+		if isClientHeaderForwardable(lowerKey) {
 			wireKey := resolveWireCasing(key)
 			for _, v := range values {
 				addHeaderRaw(req.Header, wireKey, v)
@@ -6500,15 +6517,23 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// OAuth账号：应用缓存的指纹到请求头（覆盖白名单透传的头）。
-	// Mimic / 非 OAuth 路径：覆盖整套指纹（UA + Stainless 全套）。
-	// 真 Claude Code CLI passthrough：仅覆盖 UA（账号级版本锁，跟随 fp.UserAgent
-	// 的 isNewerVersion 单调升级）+ X-Stainless-OS/Arch（与 env block 平台一致），
-	// Runtime / Lang / PackageVersion 保留客户端原值，避免吞掉真实 SDK 多样性。
+	// Mimic / 非 OAuth 路径：覆盖整套指纹（UA + Stainless 全套 + Accept-Encoding）。
+	// 真 Claude Code CLI passthrough：锁住完整版本元组——UA + Package-Version +
+	// Runtime-Version + Accept-Encoding 一起从 cache 取（跟随 isNewerVersion
+	// 单调升级），再加 X-Stainless-OS/Arch 与 env block 平台一致。Lang / Runtime
+	// 仍保留客户端原值以维持自然多样性。元组整体性避免了"UA 升、Runtime 不升"
+	// 这种内部矛盾被上游识别为伪造特征。
 	if fingerprint != nil && (mimicClaudeCode || tokenType != "oauth") {
 		s.identityService.ApplyFingerprint(req, fingerprint)
 	} else if fingerprint != nil && enableFP {
 		s.identityService.ApplyOSFingerprint(req, fingerprint)
 		s.identityService.ApplyUAFingerprint(req, fingerprint)
+	}
+	// Inject X-Claude-Code-Session-Id from body.metadata.user_id when the
+	// locked CLI version is observed to emit this header — keeps the wire
+	// view (header) consistent with the body's session identifier.
+	if fingerprint != nil {
+		s.identityService.ApplySessionIDHeader(req, body, fingerprint)
 	}
 
 	// 确保必要的headers存在（保持原始大小写）
@@ -9341,7 +9366,7 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 	if c != nil && c.Request != nil {
 		for key, values := range c.Request.Header {
 			lowerKey := strings.ToLower(strings.TrimSpace(key))
-			if !allowedHeaders[lowerKey] {
+			if !isClientHeaderForwardable(lowerKey) {
 				continue
 			}
 			wireKey := resolveWireCasing(key)
@@ -9452,7 +9477,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	// 白名单透传 headers（恢复真实 wire casing）
 	for key, values := range clientHeaders {
 		lowerKey := strings.ToLower(key)
-		if allowedHeaders[lowerKey] {
+		if isClientHeaderForwardable(lowerKey) {
 			wireKey := resolveWireCasing(key)
 			for _, v := range values {
 				addHeaderRaw(req.Header, wireKey, v)
@@ -9465,6 +9490,11 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	// Real Claude Code CLI traffic is passed through verbatim.
 	if ctEnableFP && ctFingerprint != nil && mimicClaudeCode {
 		s.identityService.ApplyFingerprint(req, ctFingerprint)
+	}
+	// Same session-id injection rule as the main forward path — sourced from
+	// body.metadata.user_id, gated on fp.EmitsSessionID.
+	if ctFingerprint != nil {
+		s.identityService.ApplySessionIDHeader(req, body, ctFingerprint)
 	}
 
 	// 确保必要的 headers 存在（保持原始大小写）
