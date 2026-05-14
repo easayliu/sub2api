@@ -4718,16 +4718,34 @@ func upgradeCLICacheTTL(body []byte) []byte {
 
 	if system := gjson.GetBytes(out, "system"); system.IsArray() {
 		index := 0
+		bannerPrefix := strings.TrimSpace(claudeCodeSystemPrompt)
 		system.ForEach(func(_, item gjson.Result) bool {
 			idx := index
 			index++
+			text := item.Get("text").String()
+			trimmed := strings.TrimLeft(text, " \t\r\n")
+
+			// Real CLI 2.1.141 keeps the Claude Code banner block bare —
+			// no cache_control at all. Some apiurl-routed clients send it
+			// with bare {type:"ephemeral"}; strip the whole cc instead of
+			// upgrading the ttl so the upstream wire shape matches direct
+			// traffic.
+			if strings.HasPrefix(trimmed, bannerPrefix) {
+				if item.Get("cache_control").Exists() {
+					if next, ok := deleteJSONPathBytes(out, fmt.Sprintf("system.%d.cache_control", idx)); ok {
+						out = next
+						modified = true
+					}
+				}
+				return true
+			}
+
 			cc := item.Get("cache_control")
 			if !cc.Exists() || cc.Get("type").String() != "ephemeral" || cc.Get("ttl").Exists() {
 				return true
 			}
-			text := item.Get("text").String()
 			newCC := anthropicCacheControlPayload{Type: "ephemeral", TTL: "1h"}
-			if strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), cliAgentInstructionsPrefix) {
+			if strings.HasPrefix(trimmed, cliAgentInstructionsPrefix) {
 				newCC.Scope = "global"
 			}
 			if next, ok := setJSONValueBytes(out, fmt.Sprintf("system.%d.cache_control", idx), newCC); ok {

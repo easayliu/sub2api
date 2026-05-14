@@ -25,7 +25,7 @@ func TestUpgradeCLICacheTTL(t *testing.T) {
 		assertMessages func(t *testing.T, messages []any)
 	}{
 		{
-			name: "agent-instructions block gets ttl + scope:global",
+			name: "banner block has cc stripped; agent-instructions block gets ttl + scope:global",
 			body: `{
 				"system": [
 					{"type":"text","text":"x-anthropic-billing-header: cch=abc;"},
@@ -42,12 +42,12 @@ func TestUpgradeCLICacheTTL(t *testing.T) {
 				_, hasCC := b0["cache_control"]
 				require.False(t, hasCC)
 
-				// Block 1: Claude Code banner -> ttl:"1h", no scope.
-				b1cc := ccOf(t, system[1])
-				require.Equal(t, "ephemeral", b1cc["type"])
-				require.Equal(t, "1h", b1cc["ttl"])
-				_, hasScope := b1cc["scope"]
-				require.False(t, hasScope)
+				// Block 1: Claude Code banner -> cc removed entirely
+				// (real CLI 2.1.141 keeps the banner block bare).
+				b1, ok := system[1].(map[string]any)
+				require.True(t, ok)
+				_, hasB1CC := b1["cache_control"]
+				require.False(t, hasB1CC, "banner block must have no cache_control")
 
 				// Block 2: agent instructions -> ttl:"1h" AND scope:"global".
 				b2cc := ccOf(t, system[2])
