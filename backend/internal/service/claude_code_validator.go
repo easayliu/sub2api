@@ -4,9 +4,11 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -40,9 +42,25 @@ func logRejectedWithShape(r *http.Request, body map[string]any, step, reason str
 	logRejected(r, step, reason, combined...)
 }
 
+// ClaudeCodeStrictSettings 暴露 Step 4.4（cc_version 后三位 SHA256 重算）的可选开关。
+// 注入方式见 NewClaudeCodeValidator / (*ClaudeCodeValidator).SetStrictCCVersionSettings：
+// 未注入或 provider 返回 true → 严格校验（与历史行为一致）；
+// 注入后返回 false → 跳过 4.4，但 4.1~4.3 / 4.5 仍生效，通过后照常标记为 Claude Code 客户端。
+type ClaudeCodeStrictSettings interface {
+	IsStrictCCVersionEnabled(ctx context.Context) bool
+}
+
+// strictSettingsBox 将 ClaudeCodeStrictSettings 接口装箱，便于在 atomic.Value
+// 中按一致的具体类型存储（直接存接口值不能在 atomic.Value 上工作）。
+type strictSettingsBox struct {
+	p ClaudeCodeStrictSettings
+}
+
 // ClaudeCodeValidator 验证请求是否来自 Claude Code 客户端
 // 完全学习自 claude-relay-service 项目的验证逻辑
-type ClaudeCodeValidator struct{}
+type ClaudeCodeValidator struct {
+	settings atomic.Value // *strictSettingsBox
+}
 
 var (
 	// User-Agent 匹配: claude-cli/x.x.x (仅支持官方 CLI，大小写不敏感)
@@ -167,9 +185,56 @@ var claudeCodeSystemPrompts = []string{
 	"You are an interactive CLI tool that helps users",
 }
 
-// NewClaudeCodeValidator 创建验证器实例
+// NewClaudeCodeValidator 创建验证器实例。
+// 不传 provider 时 Step 4.4 始终强制（向后兼容，单测沿用此构造）；生产路径在
+// 应用启动时调用 SetStrictCCVersionSettings 注入 SettingService，使开关生效。
 func NewClaudeCodeValidator() *ClaudeCodeValidator {
 	return &ClaudeCodeValidator{}
+}
+
+// SetStrictCCVersionSettings 注入 Step 4.4 开关 provider。线程安全，可在请求处理
+// 期间替换；调用方通常在应用启动一次性注入 SettingService 即可。
+//
+// 防御 typed-nil 陷阱：直接 nil 接口和"有类型但底层为 nil 的指针"（例如
+// `var s *SettingService` 传入）都按未注入处理，避免后续 IsStrictCCVersionEnabled
+// 在 nil receiver 上 panic。reflect 仅在 Set 路径调用一次，不影响热路径。
+func (v *ClaudeCodeValidator) SetStrictCCVersionSettings(p ClaudeCodeStrictSettings) {
+	if isNilProvider(p) {
+		v.settings.Store(&strictSettingsBox{p: nil})
+		return
+	}
+	v.settings.Store(&strictSettingsBox{p: p})
+}
+
+// isNilProvider 判别接口值是否在语义上"等于 nil"，覆盖两种情况：
+//  1. 无类型 nil（接口的 type word 与 value word 都为 nil）；
+//  2. typed-nil，例如 `var s *T = nil; var p Iface = s`，此时 `p == nil`
+//     为 false，但调用其指针 receiver 方法会 panic。
+//
+// 仅对指针、通道、func、map、slice 这类可 nil 的 Kind 走 reflect.IsNil；其它
+// Kind（struct、int 等）的"零值实例"是合法 provider，不应误判。
+func isNilProvider(p ClaudeCodeStrictSettings) bool {
+	if p == nil {
+		return true
+	}
+	rv := reflect.ValueOf(p)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Chan, reflect.Func, reflect.Map, reflect.Slice, reflect.Interface:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
+// strictCCVersionEnabled 读取当前 provider 决定是否执行 Step 4.4。
+// provider 未注入 / 被 SetStrictCCVersionSettings 判定为 nil → 返回 true，
+// 维持历史的"始终严格"语义。
+func (v *ClaudeCodeValidator) strictCCVersionEnabled(ctx context.Context) bool {
+	box, _ := v.settings.Load().(*strictSettingsBox)
+	if box == nil || box.p == nil {
+		return true
+	}
+	return box.p.IsStrictCCVersionEnabled(ctx)
 }
 
 // Validate 验证请求是否来自 Claude Code CLI
@@ -304,8 +369,11 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	// CLI v2.1.77+ 通过 SHA256(salt + first_user_text[4,7,20] + version)[:3] 派生
 	// 该后缀；伪造客户端要么完全省略 billing header，要么只能写出错误的 suffix。
 	// 仅对发出该 header 的 CLI 版本（>= 2.1.77）强制存在性 + 正确性。
-	if !v.validateBillingHeaderSuffix(r, body) {
-		return false
+	// 可通过管理后台 enable_strict_cc_version 关闭此段（4.1~4.3 / 4.5 仍生效）。
+	if v.strictCCVersionEnabled(r.Context()) {
+		if !v.validateBillingHeaderSuffix(r, body) {
+			return false
+		}
 	}
 
 	// 4.5 env block 存在则严格校验。

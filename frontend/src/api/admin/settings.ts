@@ -114,6 +114,7 @@ export interface SystemSettings {
   enable_fingerprint_unification: boolean
   enable_metadata_passthrough: boolean
   enable_cch_signing: boolean
+  enable_strict_cc_version: boolean
 
   // Payment configuration
   payment_enabled: boolean
@@ -214,6 +215,7 @@ export interface UpdateSettingsRequest {
   enable_fingerprint_unification?: boolean
   enable_metadata_passthrough?: boolean
   enable_cch_signing?: boolean
+  enable_strict_cc_version?: boolean
   // Payment configuration
   payment_enabled?: boolean
   payment_min_amount?: number

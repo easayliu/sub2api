@@ -84,6 +84,7 @@ type cachedGatewayForwardingSettings struct {
 	fingerprintUnification bool
 	metadataPassthrough    bool
 	cchSigning             bool
+	strictCCVersion        bool
 	expiresAt              int64 // unix nano
 }
 
@@ -594,6 +595,7 @@ func (s *SettingService) UpdateSettings(ctx context.Context, settings *SystemSet
 	updates[SettingKeyEnableFingerprintUnification] = strconv.FormatBool(settings.EnableFingerprintUnification)
 	updates[SettingKeyEnableMetadataPassthrough] = strconv.FormatBool(settings.EnableMetadataPassthrough)
 	updates[SettingKeyEnableCCHSigning] = strconv.FormatBool(settings.EnableCCHSigning)
+	updates[SettingKeyEnableStrictCCVersion] = strconv.FormatBool(settings.EnableStrictCCVersion)
 
 	err = s.settingRepo.SetMultiple(ctx, updates)
 	if err == nil {
@@ -614,6 +616,7 @@ func (s *SettingService) UpdateSettings(ctx context.Context, settings *SystemSet
 			fingerprintUnification: settings.EnableFingerprintUnification,
 			metadataPassthrough:    settings.EnableMetadataPassthrough,
 			cchSigning:             settings.EnableCCHSigning,
+			strictCCVersion:        settings.EnableStrictCCVersion,
 			expiresAt:              time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
 		})
 		if s.onUpdate != nil {
@@ -722,18 +725,32 @@ func (s *SettingService) IsBackendModeEnabled(ctx context.Context) bool {
 // Uses in-process atomic.Value cache with 60s TTL, zero-lock hot path.
 // Returns (fingerprintUnification, metadataPassthrough, cchSigning).
 func (s *SettingService) GetGatewayForwardingSettings(ctx context.Context) (fingerprintUnification, metadataPassthrough, cchSigning bool) {
+	c := s.loadGatewayForwardingCache(ctx)
+	return c.fingerprintUnification, c.metadataPassthrough, c.cchSigning
+}
+
+// IsStrictCCVersionEnabled reports whether Claude Code validation Step 4.4
+// (cc_version trailing 3-char SHA256 suffix recompute) is enforced. Shares
+// the gateway-forwarding cache, so reads are zero-lock on the hot path.
+// Fails open (true) when settings cannot be loaded, matching the historical
+// always-on behavior of validateBillingHeaderSuffix.
+func (s *SettingService) IsStrictCCVersionEnabled(ctx context.Context) bool {
+	return s.loadGatewayForwardingCache(ctx).strictCCVersion
+}
+
+// loadGatewayForwardingCache returns the cached gateway-forwarding settings,
+// refreshing under singleflight on TTL miss. Centralised here so every
+// gateway-forwarding getter shares the same cache + concurrency control.
+func (s *SettingService) loadGatewayForwardingCache(ctx context.Context) *cachedGatewayForwardingSettings {
 	if cached, ok := gatewayForwardingCache.Load().(*cachedGatewayForwardingSettings); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
-			return cached.fingerprintUnification, cached.metadataPassthrough, cached.cchSigning
+			return cached
 		}
-	}
-	type gwfResult struct {
-		fp, mp, cch bool
 	}
 	val, _, _ := gatewayForwardingSF.Do("gateway_forwarding", func() (any, error) {
 		if cached, ok := gatewayForwardingCache.Load().(*cachedGatewayForwardingSettings); ok && cached != nil {
 			if time.Now().UnixNano() < cached.expiresAt {
-				return gwfResult{cached.fingerprintUnification, cached.metadataPassthrough, cached.cchSigning}, nil
+				return cached, nil
 			}
 		}
 		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayForwardingDBTimeout)
@@ -742,16 +759,19 @@ func (s *SettingService) GetGatewayForwardingSettings(ctx context.Context) (fing
 			SettingKeyEnableFingerprintUnification,
 			SettingKeyEnableMetadataPassthrough,
 			SettingKeyEnableCCHSigning,
+			SettingKeyEnableStrictCCVersion,
 		})
 		if err != nil {
 			slog.Warn("failed to get gateway forwarding settings", "error", err)
-			gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
+			fallback := &cachedGatewayForwardingSettings{
 				fingerprintUnification: true,
 				metadataPassthrough:    false,
 				cchSigning:             false,
+				strictCCVersion:        true,
 				expiresAt:              time.Now().Add(gatewayForwardingErrorTTL).UnixNano(),
-			})
-			return gwfResult{true, false, false}, nil
+			}
+			gatewayForwardingCache.Store(fallback)
+			return fallback, nil
 		}
 		fp := true
 		if v, ok := values[SettingKeyEnableFingerprintUnification]; ok && v != "" {
@@ -759,18 +779,28 @@ func (s *SettingService) GetGatewayForwardingSettings(ctx context.Context) (fing
 		}
 		mp := values[SettingKeyEnableMetadataPassthrough] == "true"
 		cch := values[SettingKeyEnableCCHSigning] == "true"
-		gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
+		strict := true
+		if v, ok := values[SettingKeyEnableStrictCCVersion]; ok && v != "" {
+			strict = v == "true"
+		}
+		fresh := &cachedGatewayForwardingSettings{
 			fingerprintUnification: fp,
 			metadataPassthrough:    mp,
 			cchSigning:             cch,
+			strictCCVersion:        strict,
 			expiresAt:              time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
-		})
-		return gwfResult{fp, mp, cch}, nil
+		}
+		gatewayForwardingCache.Store(fresh)
+		return fresh, nil
 	})
-	if r, ok := val.(gwfResult); ok {
-		return r.fp, r.mp, r.cch
+	if c, ok := val.(*cachedGatewayForwardingSettings); ok && c != nil {
+		return c
 	}
-	return true, false, false // fail-open defaults
+	// fail-open defaults: keep historical behaviour (fingerprint + strict on)
+	return &cachedGatewayForwardingSettings{
+		fingerprintUnification: true,
+		strictCCVersion:        true,
+	}
 }
 
 // IsEmailVerifyEnabled 检查是否开启邮件验证
@@ -1216,6 +1246,11 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	}
 	result.EnableMetadataPassthrough = settings[SettingKeyEnableMetadataPassthrough] == "true"
 	result.EnableCCHSigning = settings[SettingKeyEnableCCHSigning] == "true"
+	if v, ok := settings[SettingKeyEnableStrictCCVersion]; ok && v != "" {
+		result.EnableStrictCCVersion = v == "true"
+	} else {
+		result.EnableStrictCCVersion = true // default: enforce Step 4.4 cc_version suffix
+	}
 
 	return result
 }

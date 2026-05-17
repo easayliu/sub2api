@@ -123,6 +123,7 @@ type SystemSettings struct {
 	EnableFingerprintUnification bool `json:"enable_fingerprint_unification"`
 	EnableMetadataPassthrough    bool `json:"enable_metadata_passthrough"`
 	EnableCCHSigning             bool `json:"enable_cch_signing"`
+	EnableStrictCCVersion        bool `json:"enable_strict_cc_version"`
 
 	// Payment configuration
 	PaymentEnabled           bool     `json:"payment_enabled"`

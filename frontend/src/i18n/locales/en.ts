@@ -4395,6 +4395,8 @@ export default {
         metadataPassthroughHint: 'Pass through client\'s original metadata.user_id without rewriting. May improve upstream cache hit rates.',
         cchSigning: 'CCH Signing',
         cchSigningHint: 'Sign the billing header in forwarded requests with CCH hash. When disabled, the placeholder is preserved.',
+        strictCCVersion: 'Strict Claude Code Validation (cc_version suffix)',
+        strictCCVersionHint: 'When enabled, enforces the trailing 3-char suffix of cc_version=X.Y.Z.SSS in the system x-anthropic-billing-header segment (SHA256 recompute), blocking forged clients that do not implement the derivation. Disabling skips only this step; all other fingerprint checks (UA / headers / metadata / env block) still apply, and clients that pass are still scheduled as Claude Code. Only disable if the derivation algorithm changes upstream or you need to support modified CLI builds.',
       },
       site: {
         title: 'Site Settings',

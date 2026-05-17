@@ -106,6 +106,7 @@ type SystemSettings struct {
 	EnableFingerprintUnification bool // 是否统一 OAuth 账号的指纹头（默认 true）
 	EnableMetadataPassthrough    bool // 是否透传客户端原始 metadata（默认 false）
 	EnableCCHSigning             bool // 是否对 billing header cch 进行签名（默认 false）
+	EnableStrictCCVersion        bool // 是否启用 Claude Code 校验 Step 4.4 cc_version 后三位（默认 true）
 }
 
 type DefaultSubscriptionSetting struct {

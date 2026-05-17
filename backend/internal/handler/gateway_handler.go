@@ -88,7 +88,7 @@ func NewGatewayHandler(
 		umqHelper = NewUserMsgQueueHelper(userMsgQueueService, SSEPingFormatClaude, pingInterval)
 	}
 
-	return &GatewayHandler{
+	h := &GatewayHandler{
 		gatewayService:            gatewayService,
 		geminiCompatService:       geminiCompatService,
 		antigravityGatewayService: antigravityGatewayService,
@@ -105,6 +105,12 @@ func NewGatewayHandler(
 		cfg:                       cfg,
 		settingService:            settingService,
 	}
+	// 注入 Claude Code 严格校验开关 provider，让 4.4 cc_version 后三位校验
+	// 可通过管理后台 enable_strict_cc_version 实时控制。
+	if settingService != nil {
+		claudeCodeValidator.SetStrictCCVersionSettings(settingService)
+	}
+	return h
 }
 
 // Messages handles Claude API compatible messages endpoint

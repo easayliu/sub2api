@@ -4557,6 +4557,8 @@ export default {
         metadataPassthroughHint: '透传客户端原始 metadata.user_id，不进行重写。可能提高上游缓存命中率。',
         cchSigning: 'CCH 签名',
         cchSigningHint: '对转发请求的 billing header 进行 CCH 哈希签名。关闭时保留原始占位符。',
+        strictCCVersion: 'Claude Code 严格校验（cc_version 后三位）',
+        strictCCVersionHint: '开启后强制校验 system 中 x-anthropic-billing-header 段的 cc_version=X.Y.Z.SSS 后三位（SHA256 重算结果），可阻挡未实现该派生算法的伪造客户端。关闭仅跳过这一步，其它指纹校验（UA / headers / metadata / env block）仍然生效，通过后照常按 Claude Code 客户端调度。仅在确认派生算法变更或需要兼容魔改 CLI 时关闭。',
       },
       site: {
         title: '站点设置',

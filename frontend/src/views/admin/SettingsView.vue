@@ -1709,6 +1709,19 @@
               </div>
               <Toggle v-model="form.enable_cch_signing" />
             </div>
+
+            <!-- Strict CC Version (Step 4.4) -->
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {{ t('admin.settings.gatewayForwarding.strictCCVersion') }}
+                </label>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.gatewayForwarding.strictCCVersionHint') }}
+                </p>
+              </div>
+              <Toggle v-model="form.enable_strict_cc_version" />
+            </div>
           </div>
         </div>
         </div><!-- /Tab: Gateway — Claude Code, Scheduling -->
@@ -2743,7 +2756,8 @@ const form = reactive<SettingsForm>({
   // Gateway forwarding behavior
   enable_fingerprint_unification: true,
   enable_metadata_passthrough: false,
-  enable_cch_signing: false
+  enable_cch_signing: false,
+  enable_strict_cc_version: true
 })
 
 const defaultSubscriptionGroupOptions = computed<DefaultSubscriptionGroupOption[]>(() =>
@@ -3142,6 +3156,7 @@ async function saveSettings() {
       enable_fingerprint_unification: form.enable_fingerprint_unification,
       enable_metadata_passthrough: form.enable_metadata_passthrough,
       enable_cch_signing: form.enable_cch_signing,
+      enable_strict_cc_version: form.enable_strict_cc_version,
       // Payment configuration
       payment_enabled: form.payment_enabled,
       payment_min_amount: Number(form.payment_min_amount) || 0,

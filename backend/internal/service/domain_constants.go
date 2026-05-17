@@ -250,6 +250,9 @@ const (
 	SettingKeyEnableMetadataPassthrough = "enable_metadata_passthrough"
 	// SettingKeyEnableCCHSigning 是否对 billing header 中的 cch 进行 xxHash64 签名（默认 false）
 	SettingKeyEnableCCHSigning = "enable_cch_signing"
+	// SettingKeyEnableStrictCCVersion 是否启用 Claude Code 客户端校验 Step 4.4（cc_version 后三位 SHA256 重算）
+	// 默认 true：保持现状的严格校验；关闭后 4.4 跳过，但 4.1~4.3 / 4.5 仍生效，通过仍标记为 Claude Code 客户端
+	SettingKeyEnableStrictCCVersion = "enable_strict_cc_version"
 )
 
 // AdminAPIKeyPrefix is the prefix for admin API keys (distinct from user "sk-" keys).

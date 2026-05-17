@@ -233,12 +233,12 @@ func TestBuildRejectShape(t *testing.T) {
 
 	t.Run("ua external suffix detection (case insensitive, whitespace)", func(t *testing.T) {
 		cases := map[string]bool{
-			"claude-cli/2.1.92 (external, cli)":  true,
-			"claude-cli/2.1.92 (external,cli)":   true,
-			"Claude-CLI/2.1.92 (External, CLI)":  true,
-			"claude-cli/2.1.92":                  false,
-			"claude-cli/2.1.92 (darwin; arm64)":  false,
-			"":                                   false,
+			"claude-cli/2.1.92 (external, cli)": true,
+			"claude-cli/2.1.92 (external,cli)":  true,
+			"Claude-CLI/2.1.92 (External, CLI)": true,
+			"claude-cli/2.1.92":                 false,
+			"claude-cli/2.1.92 (darwin; arm64)": false,
+			"":                                  false,
 		}
 		for ua, want := range cases {
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -374,4 +374,52 @@ func TestSetGetClaudeCodeVersion(t *testing.T) {
 
 	ctx = SetClaudeCodeVersion(ctx, "2.1.63")
 	require.Equal(t, "2.1.63", GetClaudeCodeVersion(ctx))
+}
+
+// nilSettingsProvider 是一个永远 panic 的 provider，用于断言 typed-nil 守卫
+// 是否真的拦截了底层调用。任何尝试调用其方法的代码都会被 panic 暴露。
+type nilSettingsProvider struct{}
+
+func (*nilSettingsProvider) IsStrictCCVersionEnabled(context.Context) bool {
+	panic("IsStrictCCVersionEnabled must not be called on a typed-nil provider")
+}
+
+type fixedSettingsProvider struct{ enabled bool }
+
+func (p *fixedSettingsProvider) IsStrictCCVersionEnabled(context.Context) bool {
+	return p.enabled
+}
+
+func TestClaudeCodeValidator_StrictCCVersionEnabled_DefaultsTrue(t *testing.T) {
+	v := NewClaudeCodeValidator()
+	require.True(t, v.strictCCVersionEnabled(context.Background()),
+		"未注入 provider 时应维持历史 strict 行为")
+}
+
+func TestClaudeCodeValidator_SetStrictCCVersionSettings_UntypedNil(t *testing.T) {
+	v := NewClaudeCodeValidator()
+	v.SetStrictCCVersionSettings(nil)
+	require.True(t, v.strictCCVersionEnabled(context.Background()),
+		"显式传无类型 nil 应回退到默认 strict")
+}
+
+func TestClaudeCodeValidator_SetStrictCCVersionSettings_TypedNilPointer(t *testing.T) {
+	v := NewClaudeCodeValidator()
+	var p *nilSettingsProvider // typed-nil：未通过守卫会在 strictCCVersionEnabled 中 panic
+	v.SetStrictCCVersionSettings(p)
+	require.NotPanics(t, func() {
+		require.True(t, v.strictCCVersionEnabled(context.Background()),
+			"typed-nil provider 必须被守卫识别为未注入并返回默认 strict")
+	})
+}
+
+func TestClaudeCodeValidator_SetStrictCCVersionSettings_RealProviderRespectsValue(t *testing.T) {
+	v := NewClaudeCodeValidator()
+	v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: false})
+	require.False(t, v.strictCCVersionEnabled(context.Background()),
+		"真实 provider 返回 false 时应被尊重，跳过 Step 4.4")
+
+	v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: true})
+	require.True(t, v.strictCCVersionEnabled(context.Background()),
+		"provider 替换后新值应即时生效")
 }
