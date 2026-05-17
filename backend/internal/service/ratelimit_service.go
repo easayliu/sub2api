@@ -783,13 +783,25 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			}
 		}
 
-		// Anthropic 平台：没有限流重置时间的 429 可能是非真实限流（如 Extra usage required），
-		// 不标记账号限流状态，直接透传错误给客户端
+		// Anthropic 无 reset 头的 429 通常是 org 级 TPM/RPM 限制（窗口 ~1 分钟），
+		// 短时 temp_unschedulable 让账号在窗口期退出调度，配合上层 failover 避免被反复选中。
 		if account.Platform == PlatformAnthropic {
-			slog.Warn("rate_limit_429_no_reset_time_skipped",
+			const tpmCooldown = 60 * time.Second
+			until := time.Now().Add(tpmCooldown)
+			msg := "Rate limit (429): per-minute window"
+			if upstream := strings.TrimSpace(extractUpstreamErrorMessage(responseBody)); upstream != "" {
+				upstream = sanitizeUpstreamErrorMessage(upstream)
+				upstream = truncateForLog([]byte(upstream), 256)
+				msg = "Rate limit (429): " + upstream
+			}
+			if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, msg); err != nil {
+				slog.Warn("anthropic_429_temp_unsched_set_failed", "account_id", account.ID, "error", err)
+				return
+			}
+			slog.Info("anthropic_429_temp_unsched",
 				"account_id", account.ID,
-				"platform", account.Platform,
-				"reason", "no rate limit reset time in headers, likely not a real rate limit")
+				"cooldown", tpmCooldown,
+				"reason", "no rate limit reset header")
 			return
 		}
 
