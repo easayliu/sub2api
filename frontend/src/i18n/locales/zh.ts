@@ -2453,6 +2453,8 @@ export default {
       claudeConsole: 'Claude Console',
       bedrockLabel: 'AWS Bedrock',
       bedrockDesc: 'SigV4 / API Key',
+      awsAnthropicLabel: 'Claude on AWS',
+      awsAnthropicDesc: 'Workspace API Key',
       oauthSetupToken: 'OAuth / Setup Token',
       addMethod: '添加方式',
       setupTokenLongLived: 'Setup Token（长期有效）',
@@ -2679,6 +2681,20 @@ export default {
       bedrockApiKeyLeaveEmpty: '留空以保持当前密钥',
       apiKeyIsRequired: 'API Key 是必需的',
       leaveEmptyToKeep: '留空以保持当前密钥',
+      // Claude Platform on AWS (aws-anthropic) - 原生 Anthropic 协议 + workspace_id 头
+      awsAnthropic: {
+        apiKey: 'Workspace API Key',
+        apiKeyPlaceholder: 'sk-ant-... 或 AEAA...',
+        workspaceId: 'Workspace ID',
+        workspaceIdPlaceholder: 'wrkspc_01ABCDEFGHIJKLMN',
+        workspaceIdHint: 'AWS Console → Claude Platform on AWS → Workspaces',
+        workspaceIdRequired: '请输入 Workspace ID',
+        region: 'AWS Region',
+        regionHint: '端点：https://aws-external-anthropic.{region}.api.aws',
+        baseUrl: 'Base URL 覆盖（可选）',
+        baseUrlHint: '留空则按 region 自动计算；填写后将覆盖默认 URL，便于走代理/网关。',
+        baseUrlEditHint: '留空则按 region 自动计算；填写后将覆盖默认 URL，便于走代理/网关。'
+      },
       // Upstream type
       upstream: {
         baseUrl: '上游 Base URL',

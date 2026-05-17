@@ -88,6 +88,8 @@ const typeLabel = computed(() => {
       return 'Key'
     case 'bedrock':
       return 'AWS'
+    case 'aws-anthropic':
+      return 'AWS·Anthropic'
     default:
       return props.type
   }

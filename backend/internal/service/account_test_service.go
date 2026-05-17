@@ -208,6 +208,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	var authToken string
 	var useBearer bool
 	var apiURL string
+	awsAnthropicWorkspaceID := ""
 
 	if account.IsOAuth() {
 		// OAuth or Setup Token - use Bearer token
@@ -217,6 +218,22 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No access token available")
 		}
+	} else if account.IsAWSAnthropic() {
+		// Claude Platform on AWS - x-api-key + anthropic-workspace-id, URL 由 aws_region/base_url 计算
+		useBearer = false
+		authToken = account.GetAWSAnthropicAPIKey()
+		if authToken == "" {
+			return s.sendErrorAndEnd(c, "No API key available")
+		}
+		awsAnthropicWorkspaceID = strings.TrimSpace(account.GetAWSAnthropicWorkspaceID())
+		if awsAnthropicWorkspaceID == "" {
+			return s.sendErrorAndEnd(c, "No workspace_id available")
+		}
+		normalizedBaseURL, err := s.validateUpstreamBaseURL(account.GetAWSAnthropicBaseURL())
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+		}
+		apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/v1/messages?beta=true"
 	} else if account.Type == "apikey" {
 		// API Key - use x-api-key header
 		useBearer = false
@@ -276,6 +293,11 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	} else {
 		req.Header.Set("anthropic-beta", claude.APIKeyBetaHeader)
 		req.Header.Set("x-api-key", authToken)
+	}
+
+	// Claude Platform on AWS 必须带 workspace_id 头
+	if awsAnthropicWorkspaceID != "" {
+		req.Header.Set("anthropic-workspace-id", awsAnthropicWorkspaceID)
 	}
 
 	// Get proxy URL

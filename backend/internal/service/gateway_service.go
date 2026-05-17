@@ -3914,6 +3914,12 @@ func (s *GatewayService) GetAccessToken(ctx context.Context, account *Account) (
 		return apiKey, "apikey", nil
 	case AccountTypeBedrock:
 		return "", "bedrock", nil // Bedrock 使用 SigV4 签名或 API Key，由 forwardBedrock 处理
+	case AccountTypeAWSAnthropic:
+		apiKey := account.GetAWSAnthropicAPIKey()
+		if apiKey == "" {
+			return "", "", errors.New("api_key not found in aws-anthropic credentials")
+		}
+		return apiKey, "apikey", nil
 	default:
 		return "", "", fmt.Errorf("unsupported account type: %s", account.Type)
 	}
@@ -4820,6 +4826,26 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		return s.forwardBedrock(ctx, c, account, parsed, startTime)
 	}
 
+	// Claude Platform on AWS：原生 Anthropic 协议 + workspace_id 头，复用 APIKey passthrough 管线。
+	if account != nil && account.IsAWSAnthropic() {
+		passthroughBody := parsed.Body
+		passthroughModel := parsed.Model
+		if passthroughModel != "" {
+			if mappedModel := account.GetMappedModel(passthroughModel); mappedModel != passthroughModel {
+				passthroughBody = s.replaceModelInBody(passthroughBody, mappedModel)
+				logger.LegacyPrintf("service.gateway", "[debug] [AWS Anthropic] model mapping: %s -> %s (account: %s)", parsed.Model, mappedModel, account.Name)
+				passthroughModel = mappedModel
+			}
+		}
+		return s.forwardAnthropicAPIKeyPassthroughWithInput(ctx, c, account, anthropicPassthroughForwardInput{
+			Body:          passthroughBody,
+			RequestModel:  passthroughModel,
+			OriginalModel: parsed.Model,
+			RequestStream: parsed.Stream,
+			StartTime:     startTime,
+		})
+	}
+
 	// Beta policy: evaluate once; block check + cache filter set for buildUpstreamRequest.
 	// Always overwrite the cache to prevent stale values from a previous retry with a different account.
 	if account.Platform == PlatformAnthropic && c != nil {
@@ -5653,8 +5679,22 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 	token string,
 ) (*http.Request, error) {
 	targetURL := claudeAPIURL
-	baseURL := account.GetBaseURL()
-	if baseURL != "" {
+	isAWSAnthropic := account.IsAWSAnthropic()
+	var awsWorkspaceID string
+	if isAWSAnthropic {
+		// Claude Platform on AWS：上游走原生 Anthropic /v1/messages 协议，
+		// URL 按 aws_region 计算或由 credentials.base_url 覆盖（便于走代理）。
+		awsWorkspaceID = strings.TrimSpace(account.GetAWSAnthropicWorkspaceID())
+		if awsWorkspaceID == "" {
+			return nil, errors.New("workspace_id not found in aws-anthropic credentials")
+		}
+		baseURL := account.GetAWSAnthropicBaseURL()
+		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return nil, err
+		}
+		targetURL = validatedURL + "/v1/messages?beta=true"
+	} else if baseURL := account.GetBaseURL(); baseURL != "" {
 		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 		if err != nil {
 			return nil, err
@@ -5692,6 +5732,10 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 	}
 	if getHeaderRaw(req.Header, "anthropic-version") == "" {
 		setHeaderRaw(req.Header, "anthropic-version", "2023-06-01")
+	}
+
+	if isAWSAnthropic {
+		setHeaderRaw(req.Header, "anthropic-workspace-id", awsWorkspaceID)
 	}
 
 	return req, nil
@@ -9061,7 +9105,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 		return fmt.Errorf("parse request: empty request")
 	}
 
-	if account != nil && account.IsAnthropicAPIKeyPassthroughEnabled() {
+	if account != nil && (account.IsAnthropicAPIKeyPassthroughEnabled() || account.IsAWSAnthropic()) {
 		passthroughBody := parsed.Body
 		if reqModel := parsed.Model; reqModel != "" {
 			if mappedModel := account.GetMappedModel(reqModel); mappedModel != reqModel {
@@ -9367,8 +9411,20 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 	token string,
 ) (*http.Request, error) {
 	targetURL := claudeAPICountTokensURL
-	baseURL := account.GetBaseURL()
-	if baseURL != "" {
+	isAWSAnthropic := account.IsAWSAnthropic()
+	var awsWorkspaceID string
+	if isAWSAnthropic {
+		awsWorkspaceID = strings.TrimSpace(account.GetAWSAnthropicWorkspaceID())
+		if awsWorkspaceID == "" {
+			return nil, errors.New("workspace_id not found in aws-anthropic credentials")
+		}
+		baseURL := account.GetAWSAnthropicBaseURL()
+		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return nil, err
+		}
+		targetURL = validatedURL + "/v1/messages/count_tokens?beta=true"
+	} else if baseURL := account.GetBaseURL(); baseURL != "" {
 		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 		if err != nil {
 			return nil, err
@@ -9405,6 +9461,10 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 	}
 	if req.Header.Get("anthropic-version") == "" {
 		req.Header.Set("anthropic-version", "2023-06-01")
+	}
+
+	if isAWSAnthropic {
+		req.Header.Set("anthropic-workspace-id", awsWorkspaceID)
 	}
 
 	return req, nil

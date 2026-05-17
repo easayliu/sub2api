@@ -293,7 +293,7 @@ const rpmTooltip = computed(() => {
 })
 
 // 是否显示各维度配额（apikey / bedrock 类型）
-const isQuotaEligible = computed(() => props.account.type === 'apikey' || props.account.type === 'bedrock')
+const isQuotaEligible = computed(() => props.account.type === 'apikey' || props.account.type === 'bedrock' || props.account.type === 'aws-anthropic')
 
 const showDailyQuota = computed(() => {
   return isQuotaEligible.value && (props.account.quota_daily_limit ?? 0) > 0

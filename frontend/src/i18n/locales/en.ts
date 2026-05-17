@@ -2303,6 +2303,8 @@ export default {
       claudeConsole: 'Claude Console',
       bedrockLabel: 'AWS Bedrock',
       bedrockDesc: 'SigV4 / API Key',
+      awsAnthropicLabel: 'Claude on AWS',
+      awsAnthropicDesc: 'Workspace API Key',
       oauthSetupToken: 'OAuth / Setup Token',
       addMethod: 'Add Method',
       setupTokenLongLived: 'Setup Token (Long-lived)',
@@ -2536,6 +2538,20 @@ export default {
       bedrockApiKeyLeaveEmpty: 'Leave empty to keep current key',
       apiKeyIsRequired: 'API Key is required',
       leaveEmptyToKeep: 'Leave empty to keep current key',
+      // Claude Platform on AWS (aws-anthropic) - native Anthropic protocol + workspace_id header
+      awsAnthropic: {
+        apiKey: 'Workspace API Key',
+        apiKeyPlaceholder: 'sk-ant-... or AEAA...',
+        workspaceId: 'Workspace ID',
+        workspaceIdPlaceholder: 'wrkspc_01ABCDEFGHIJKLMN',
+        workspaceIdHint: 'AWS Console → Claude Platform on AWS → Workspaces',
+        workspaceIdRequired: 'Workspace ID is required',
+        region: 'AWS Region',
+        regionHint: 'Endpoint: https://aws-external-anthropic.{region}.api.aws',
+        baseUrl: 'Base URL Override (optional)',
+        baseUrlHint: 'Leave empty to derive from region; set to route through a proxy/gateway.',
+        baseUrlEditHint: 'Leave empty to derive from region; set to route through a proxy/gateway.'
+      },
       // Upstream type
       upstream: {
         baseUrl: 'Upstream Base URL',

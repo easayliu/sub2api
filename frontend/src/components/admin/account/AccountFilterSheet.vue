@@ -115,7 +115,8 @@ const typeOptions = computed<FilterOption[]>(() => [
   { value: 'oauth', label: t('admin.accounts.oauthType') },
   { value: 'setup-token', label: t('admin.accounts.setupToken') },
   { value: 'apikey', label: t('admin.accounts.apiKey') },
-  { value: 'bedrock', label: 'AWS Bedrock' }
+  { value: 'bedrock', label: 'AWS Bedrock' },
+  { value: 'aws-anthropic', label: t('admin.accounts.awsAnthropicLabel') }
 ])
 
 const statusOptions = computed<FilterOption[]>(() => [

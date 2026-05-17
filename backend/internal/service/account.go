@@ -831,9 +831,45 @@ func (a *Account) IsBedrockAPIKey() bool {
 	return a.IsBedrock() && a.GetCredential("auth_mode") == "apikey"
 }
 
+// IsAWSAnthropic 判断是否为 Claude Platform on AWS 类型账号。
+// 该平台走原生 Anthropic /v1/messages 协议，但 URL 形如
+// https://aws-external-anthropic.<region>.api.aws，且必须携带 anthropic-workspace-id 头。
+func (a *Account) IsAWSAnthropic() bool {
+	return a.Platform == PlatformAnthropic && a.Type == AccountTypeAWSAnthropic
+}
+
+// GetAWSAnthropicAPIKey 返回 Claude Platform on AWS 的 workspace API key。
+func (a *Account) GetAWSAnthropicAPIKey() string {
+	return a.GetCredential("api_key")
+}
+
+// GetAWSAnthropicWorkspaceID 返回 Claude Platform on AWS 的 workspace_id（wrkspc_xxx）。
+func (a *Account) GetAWSAnthropicWorkspaceID() string {
+	return a.GetCredential("workspace_id")
+}
+
+// GetAWSAnthropicRegion 返回 Claude Platform on AWS 的 AWS region，默认 us-east-1。
+func (a *Account) GetAWSAnthropicRegion() string {
+	region := strings.TrimSpace(a.GetCredential("aws_region"))
+	if region == "" {
+		return "us-east-1"
+	}
+	return region
+}
+
+// GetAWSAnthropicBaseURL 返回 Claude Platform on AWS 的 base URL。
+// 若 credentials.base_url 显式提供则用之（便于走代理/网关），否则按 region 计算。
+func (a *Account) GetAWSAnthropicBaseURL() string {
+	if override := strings.TrimSpace(a.GetCredential("base_url")); override != "" {
+		return strings.TrimRight(override, "/")
+	}
+	return "https://aws-external-anthropic." + a.GetAWSAnthropicRegion() + ".api.aws"
+}
+
 // IsAPIKeyOrBedrock 返回账号类型是否支持配额和池模式等特性
+// 命名保留历史含义；新增的 aws-anthropic 也按 API Key 模式参与计费、池/配额。
 func (a *Account) IsAPIKeyOrBedrock() bool {
-	return a.Type == AccountTypeAPIKey || a.Type == AccountTypeBedrock
+	return a.Type == AccountTypeAPIKey || a.Type == AccountTypeBedrock || a.Type == AccountTypeAWSAnthropic
 }
 
 func (a *Account) IsOpenAI() bool {
