@@ -5,6 +5,33 @@ import (
 	"testing"
 )
 
+func TestSupportsRPMLimit(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform string
+		typ      string
+		expected bool
+	}{
+		{"anthropic oauth", PlatformAnthropic, AccountTypeOAuth, true},
+		{"anthropic setup-token", PlatformAnthropic, AccountTypeSetupToken, true},
+		{"anthropic aws-anthropic", PlatformAnthropic, AccountTypeAWSAnthropic, true},
+		{"anthropic apikey", PlatformAnthropic, AccountTypeAPIKey, false},
+		{"anthropic bedrock", PlatformAnthropic, AccountTypeBedrock, false},
+		{"anthropic upstream", PlatformAnthropic, AccountTypeUpstream, false},
+		{"openai oauth", PlatformOpenAI, AccountTypeOAuth, false},
+		{"openai apikey", PlatformOpenAI, AccountTypeAPIKey, false},
+		{"gemini oauth", PlatformGemini, AccountTypeOAuth, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &Account{Platform: tt.platform, Type: tt.typ}
+			if got := a.SupportsRPMLimit(); got != tt.expected {
+				t.Errorf("SupportsRPMLimit() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestGetBaseRPM(t *testing.T) {
 	tests := []struct {
 		name     string

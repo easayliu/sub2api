@@ -1234,6 +1234,18 @@ func (a *Account) IsAnthropicOAuthOrSetupToken() bool {
 	return a.Platform == PlatformAnthropic && (a.Type == AccountTypeOAuth || a.Type == AccountTypeSetupToken)
 }
 
+// SupportsRPMLimit 判断账号是否支持 RPM 限制。
+// 覆盖 Anthropic OAuth / SetupToken / AWS Anthropic 三种类型，
+// 这些账号都按 Anthropic 协议直连上游，存在被速率限制/封禁的可能。
+func (a *Account) SupportsRPMLimit() bool {
+	if a.Platform != PlatformAnthropic {
+		return false
+	}
+	return a.Type == AccountTypeOAuth ||
+		a.Type == AccountTypeSetupToken ||
+		a.Type == AccountTypeAWSAnthropic
+}
+
 // IsTLSFingerprintEnabled 检查是否启用 TLS 指纹伪装
 // 仅适用于 Anthropic OAuth/SetupToken 类型账号
 // 启用后将模拟 Claude Code (Node.js) 客户端的 TLS 握手特征

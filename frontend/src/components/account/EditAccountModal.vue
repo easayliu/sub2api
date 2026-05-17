@@ -1322,6 +1322,110 @@
         />
       </div>
 
+      <!-- AWS Anthropic RPM 限制（独立于 OAuth/SetupToken 的 Quota Control，仅暴露 RPM 子项） -->
+      <div
+        v-if="account?.platform === 'anthropic' && account?.type === 'aws-anthropic'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
+      >
+        <div class="mb-3">
+          <h3 class="input-label mb-0 text-base font-semibold">{{ t('admin.accounts.quotaControl.rpmLimit.label') }}</h3>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.quotaControl.rpmLimit.hint') }}
+          </p>
+        </div>
+
+        <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+          <div class="mb-3 flex items-center justify-between">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.rpmLimit.label') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.quotaControl.rpmLimit.hint') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              @click="rpmLimitEnabled = !rpmLimitEnabled"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+                rpmLimitEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+              ]"
+            >
+              <span
+                :class="[
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                  rpmLimitEnabled ? 'translate-x-5' : 'translate-x-0'
+                ]"
+              />
+            </button>
+          </div>
+
+          <div v-if="rpmLimitEnabled" class="space-y-4">
+            <div>
+              <label class="input-label">{{ t('admin.accounts.quotaControl.rpmLimit.baseRpm') }}</label>
+              <input
+                v-model.number="baseRpm"
+                type="number"
+                min="1"
+                max="1000"
+                step="1"
+                class="input"
+                :placeholder="t('admin.accounts.quotaControl.rpmLimit.baseRpmPlaceholder')"
+              />
+              <p class="input-hint">{{ t('admin.accounts.quotaControl.rpmLimit.baseRpmHint') }}</p>
+            </div>
+
+            <div>
+              <label class="input-label">{{ t('admin.accounts.quotaControl.rpmLimit.strategy') }}</label>
+              <div class="flex gap-2">
+                <button
+                  type="button"
+                  @click="rpmStrategy = 'tiered'"
+                  :class="[
+                    'flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-all',
+                    rpmStrategy === 'tiered'
+                      ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+                  ]"
+                >
+                  <div class="text-center">
+                    <div>{{ t('admin.accounts.quotaControl.rpmLimit.strategyTiered') }}</div>
+                    <div class="mt-0.5 text-[10px] opacity-70">{{ t('admin.accounts.quotaControl.rpmLimit.strategyTieredHint') }}</div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  @click="rpmStrategy = 'sticky_exempt'"
+                  :class="[
+                    'flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-all',
+                    rpmStrategy === 'sticky_exempt'
+                      ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+                  ]"
+                >
+                  <div class="text-center">
+                    <div>{{ t('admin.accounts.quotaControl.rpmLimit.strategyStickyExempt') }}</div>
+                    <div class="mt-0.5 text-[10px] opacity-70">{{ t('admin.accounts.quotaControl.rpmLimit.strategyStickyExemptHint') }}</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            <div v-if="rpmStrategy === 'tiered'">
+              <label class="input-label">{{ t('admin.accounts.quotaControl.rpmLimit.stickyBuffer') }}</label>
+              <input
+                v-model.number="rpmStickyBuffer"
+                type="number"
+                min="1"
+                step="1"
+                class="input"
+                :placeholder="t('admin.accounts.quotaControl.rpmLimit.stickyBufferPlaceholder')"
+              />
+              <p class="input-hint">{{ t('admin.accounts.quotaControl.rpmLimit.stickyBufferHint') }}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- OpenAI OAuth Codex 官方客户端限制开关 -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
@@ -2707,6 +2811,17 @@ function loadQuotaControlSettings(account: Account) {
   customBaseUrlEnabled.value = false
   customBaseUrl.value = ''
 
+  // RPM 限制对 OAuth / SetupToken / AWS Anthropic 三类账号有效
+  const supportsRpm =
+    account.platform === 'anthropic' &&
+    (account.type === 'oauth' || account.type === 'setup-token' || account.type === 'aws-anthropic')
+  if (supportsRpm && account.base_rpm != null && account.base_rpm > 0) {
+    rpmLimitEnabled.value = true
+    baseRpm.value = account.base_rpm
+    rpmStrategy.value = (account.rpm_strategy as 'tiered' | 'sticky_exempt') || 'tiered'
+    rpmStickyBuffer.value = account.rpm_sticky_buffer ?? null
+  }
+
   // Only applies to Anthropic OAuth/SetupToken accounts
   if (account.platform !== 'anthropic' || (account.type !== 'oauth' && account.type !== 'setup-token')) {
     return
@@ -2723,14 +2838,6 @@ function loadQuotaControlSettings(account: Account) {
     deviceLimitEnabled.value = true
     maxDevices.value = account.max_devices
     deviceIdleTimeout.value = account.device_idle_timeout_minutes ?? 5
-  }
-
-  // RPM limit
-  if (account.base_rpm != null && account.base_rpm > 0) {
-    rpmLimitEnabled.value = true
-    baseRpm.value = account.base_rpm
-    rpmStrategy.value = (account.rpm_strategy as 'tiered' | 'sticky_exempt') || 'tiered'
-    rpmStickyBuffer.value = account.rpm_sticky_buffer ?? null
   }
 
   // UMQ mode（独立于 RPM 加载，防止编辑无 RPM 账号时丢失已有配置）
@@ -3179,9 +3286,43 @@ const handleSubmit = async () => {
       updatePayload.extra = newExtra
     }
 
+    // RPM 限制对 OAuth / SetupToken / AWS Anthropic 三类账号有效
+    const rpmEligible =
+      props.account.platform === 'anthropic' &&
+      (props.account.type === 'oauth' ||
+        props.account.type === 'setup-token' ||
+        props.account.type === 'aws-anthropic')
+    if (rpmEligible) {
+      const currentExtra =
+        (updatePayload.extra as Record<string, unknown> | undefined) ??
+        ((props.account.extra as Record<string, unknown>) || {})
+      const newExtra: Record<string, unknown> = { ...currentExtra }
+
+      if (rpmLimitEnabled.value) {
+        const DEFAULT_BASE_RPM = 15
+        newExtra.base_rpm = (baseRpm.value != null && baseRpm.value > 0)
+          ? baseRpm.value
+          : DEFAULT_BASE_RPM
+        newExtra.rpm_strategy = rpmStrategy.value
+        if (rpmStickyBuffer.value != null && rpmStickyBuffer.value > 0) {
+          newExtra.rpm_sticky_buffer = rpmStickyBuffer.value
+        } else {
+          delete newExtra.rpm_sticky_buffer
+        }
+      } else {
+        delete newExtra.base_rpm
+        delete newExtra.rpm_strategy
+        delete newExtra.rpm_sticky_buffer
+      }
+
+      updatePayload.extra = newExtra
+    }
+
     // For Anthropic OAuth/SetupToken accounts, handle quota control settings in extra
     if (props.account.platform === 'anthropic' && (props.account.type === 'oauth' || props.account.type === 'setup-token')) {
-      const currentExtra = (props.account.extra as Record<string, unknown>) || {}
+      const currentExtra =
+        (updatePayload.extra as Record<string, unknown> | undefined) ??
+        ((props.account.extra as Record<string, unknown>) || {})
       const newExtra: Record<string, unknown> = { ...currentExtra }
 
       // Window cost limit settings
@@ -3200,24 +3341,6 @@ const handleSubmit = async () => {
       } else {
         delete newExtra.max_devices
         delete newExtra.device_idle_timeout_minutes
-      }
-
-      // RPM limit settings
-      if (rpmLimitEnabled.value) {
-        const DEFAULT_BASE_RPM = 15
-        newExtra.base_rpm = (baseRpm.value != null && baseRpm.value > 0)
-          ? baseRpm.value
-          : DEFAULT_BASE_RPM
-        newExtra.rpm_strategy = rpmStrategy.value
-        if (rpmStickyBuffer.value != null && rpmStickyBuffer.value > 0) {
-          newExtra.rpm_sticky_buffer = rpmStickyBuffer.value
-        } else {
-          delete newExtra.rpm_sticky_buffer
-        }
-      } else {
-        delete newExtra.base_rpm
-        delete newExtra.rpm_strategy
-        delete newExtra.rpm_sticky_buffer
       }
 
       // UMQ mode（独立于 RPM 保存）

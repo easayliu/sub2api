@@ -53,7 +53,7 @@
       </span>
     </div>
 
-    <!-- RPM 限制（仅 Anthropic OAuth/SetupToken 且启用时显示） -->
+    <!-- RPM 限制（Anthropic OAuth/SetupToken/AWS Anthropic 且启用时显示） -->
     <div v-if="showRpmLimit" class="flex items-center gap-1">
       <span
         :class="[
@@ -99,6 +99,16 @@ const isAnthropicOAuthOrSetupToken = computed(() => {
   return (
     props.account.platform === 'anthropic' &&
     (props.account.type === 'oauth' || props.account.type === 'setup-token')
+  )
+})
+
+// 是否支持 RPM 限制（OAuth / SetupToken / AWS Anthropic）
+const supportsRpmLimit = computed(() => {
+  return (
+    props.account.platform === 'anthropic' &&
+    (props.account.type === 'oauth' ||
+      props.account.type === 'setup-token' ||
+      props.account.type === 'aws-anthropic')
   )
 })
 
@@ -212,7 +222,7 @@ const deviceLimitTooltip = computed(() => {
 // 是否显示 RPM 限制
 const showRpmLimit = computed(() => {
   return (
-    isAnthropicOAuthOrSetupToken.value &&
+    supportsRpmLimit.value &&
     props.account.base_rpm !== undefined &&
     props.account.base_rpm !== null &&
     props.account.base_rpm > 0

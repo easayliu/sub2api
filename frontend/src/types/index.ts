@@ -715,11 +715,11 @@ export interface Account {
   max_devices?: number | null
   device_idle_timeout_minutes?: number | null
 
-  // RPM 限制（仅 Anthropic OAuth/SetupToken 账号有效）
+  // RPM 限制（Anthropic OAuth/SetupToken/AWS Anthropic 账号有效）
   base_rpm?: number | null
   rpm_strategy?: string | null
   rpm_sticky_buffer?: number | null
-  user_msg_queue_mode?: string | null  // "serialize" | "throttle" | null
+  user_msg_queue_mode?: string | null  // "serialize" | "throttle" | null（仅 OAuth/SetupToken 有效）
 
   // TLS指纹伪装（仅 Anthropic OAuth/SetupToken 账号有效）
   enable_tls_fingerprint?: boolean | null
