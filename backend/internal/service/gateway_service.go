@@ -5725,7 +5725,13 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 	req.Header.Del("x-api-key")
 	req.Header.Del("x-goog-api-key")
 	req.Header.Del("cookie")
-	setHeaderRaw(req.Header, "x-api-key", token)
+	if isAWSAnthropic {
+		// Claude Platform on AWS 的 Workspace API Key（AEAA 开头）是 AWS Marketplace 颁发的
+		// bearer token，与 Bedrock API Key 同源，需通过 Authorization: Bearer 提交。
+		setHeaderRaw(req.Header, "Authorization", "Bearer "+token)
+	} else {
+		setHeaderRaw(req.Header, "x-api-key", token)
+	}
 
 	if getHeaderRaw(req.Header, "content-type") == "" {
 		setHeaderRaw(req.Header, "content-type", "application/json")
@@ -9454,7 +9460,13 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 	req.Header.Del("x-api-key")
 	req.Header.Del("x-goog-api-key")
 	req.Header.Del("cookie")
-	req.Header.Set("x-api-key", token)
+	if isAWSAnthropic {
+		// Claude Platform on AWS 的 Workspace API Key 是 AWS Marketplace bearer token，
+		// 走 Authorization: Bearer（与 Bedrock API Key 一致）。
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		req.Header.Set("x-api-key", token)
+	}
 
 	if req.Header.Get("content-type") == "" {
 		req.Header.Set("content-type", "application/json")

@@ -219,8 +219,10 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 			return s.sendErrorAndEnd(c, "No access token available")
 		}
 	} else if account.IsAWSAnthropic() {
-		// Claude Platform on AWS - x-api-key + anthropic-workspace-id, URL 由 aws_region/base_url 计算
-		useBearer = false
+		// Claude Platform on AWS - Authorization: Bearer + anthropic-workspace-id；
+		// URL 由 aws_region/base_url 计算。Workspace API Key 是 AWS Marketplace 颁发的
+		// bearer token（与 Bedrock API Key 同源），不能用 x-api-key 提交。
+		useBearer = true
 		authToken = account.GetAWSAnthropicAPIKey()
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No API key available")
