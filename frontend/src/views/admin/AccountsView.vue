@@ -63,7 +63,7 @@
                 <button
                   @click="
                     showAutoRefreshDropdown = !showAutoRefreshDropdown;
-                    showColumnDropdown = false
+                    showMoreDropdown = false
                   "
                   class="btn btn-secondary px-2 md:px-3"
                   :title="t('admin.accounts.autoRefresh')"
@@ -103,67 +103,71 @@
                 </div>
               </div>
 
-              <!-- Error Passthrough Rules -->
-              <button
-                @click="showErrorPassthrough = true"
-                class="btn btn-secondary"
-                :title="t('admin.errorPassthrough.title')"
-              >
-                <Icon name="shield" size="md" class="mr-1.5" />
-                <span class="hidden md:inline">{{ t('admin.errorPassthrough.title') }}</span>
-              </button>
-
-              <!-- TLS Fingerprint Profiles -->
-              <button
-                @click="showTLSFingerprintProfiles = true"
-                class="btn btn-secondary"
-                :title="t('admin.tlsFingerprintProfiles.title')"
-              >
-                <Icon name="lock" size="md" class="mr-1.5" />
-                <span class="hidden md:inline">{{ t('admin.tlsFingerprintProfiles.title') }}</span>
-              </button>
-
-              <!-- Column Settings Dropdown -->
-              <div class="relative" ref="columnDropdownRef">
+              <!-- More Actions Dropdown (合并低频按钮：导入/导出/错误透传/TLS指纹/列设置) -->
+              <div class="relative" ref="moreDropdownRef">
                 <button
                   @click="
-                    showColumnDropdown = !showColumnDropdown;
+                    showMoreDropdown = !showMoreDropdown;
                     showAutoRefreshDropdown = false
                   "
                   class="btn btn-secondary px-2 md:px-3"
-                  :title="t('admin.users.columnSettings')"
+                  :title="t('common.more')"
                 >
-                  <svg class="h-4 w-4 md:mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 4.5v15m6-15v15m-10.875 0h15.75c.621 0 1.125-.504 1.125-1.125V5.625c0-.621-.504-1.125-1.125-1.125H4.125C3.504 4.5 3 5.004 3 5.625v12.75c0 .621.504 1.125 1.125 1.125z" />
-                  </svg>
-                  <span class="hidden md:inline">{{ t('admin.users.columnSettings') }}</span>
+                  <Icon name="more" size="md" />
+                  <span class="hidden md:inline ml-1.5">{{ t('common.more') }}</span>
                 </button>
-                <!-- Dropdown menu -->
                 <div
-                  v-if="showColumnDropdown"
-                  class="absolute right-0 z-50 mt-2 w-48 origin-top-right rounded-lg border border-gray-200 bg-white shadow-lg dark:border-gray-700 dark:bg-gray-800"
+                  v-if="showMoreDropdown"
+                  class="absolute right-0 z-50 mt-2 w-64 origin-top-right rounded-lg border border-gray-200 bg-white shadow-lg dark:border-gray-700 dark:bg-gray-800"
                 >
-                  <div class="max-h-80 overflow-y-auto p-2">
+                  <div class="py-1">
                     <button
-                      v-for="col in toggleableColumns"
-                      :key="col.key"
-                      @click="toggleColumn(col.key)"
-                      class="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                      @click="showImportData = true; showMoreDropdown = false"
+                      class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
                     >
-                      <span>{{ col.label }}</span>
-                      <Icon v-if="isColumnVisible(col.key)" name="check" size="sm" class="text-primary-500" />
+                      <Icon name="arrowDown" size="sm" class="text-gray-400" />
+                      <span>{{ t('admin.accounts.dataImport') }}</span>
                     </button>
+                    <button
+                      @click="openExportDataDialog(); showMoreDropdown = false"
+                      class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                    >
+                      <Icon name="arrowUp" size="sm" class="text-gray-400" />
+                      <span>{{ selIds.length ? t('admin.accounts.dataExportSelected') : t('admin.accounts.dataExport') }}</span>
+                    </button>
+                    <div class="my-1 border-t border-gray-100 dark:border-gray-700"></div>
+                    <button
+                      @click="showErrorPassthrough = true; showMoreDropdown = false"
+                      class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                    >
+                      <Icon name="shield" size="sm" class="text-gray-400" />
+                      <span>{{ t('admin.errorPassthrough.title') }}</span>
+                    </button>
+                    <button
+                      @click="showTLSFingerprintProfiles = true; showMoreDropdown = false"
+                      class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                    >
+                      <Icon name="lock" size="sm" class="text-gray-400" />
+                      <span>{{ t('admin.tlsFingerprintProfiles.title') }}</span>
+                    </button>
+                    <div class="my-1 border-t border-gray-100 dark:border-gray-700"></div>
+                    <div class="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                      {{ t('admin.users.columnSettings') }}
+                    </div>
+                    <div class="max-h-56 overflow-y-auto">
+                      <button
+                        v-for="col in toggleableColumns"
+                        :key="col.key"
+                        @click="toggleColumn(col.key)"
+                        class="flex w-full items-center justify-between px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                      >
+                        <span>{{ col.label }}</span>
+                        <Icon v-if="isColumnVisible(col.key)" name="check" size="sm" class="text-primary-500" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </template>
-            <template #beforeCreate>
-              <button @click="showImportData = true" class="btn btn-secondary">
-                {{ t('admin.accounts.dataImport') }}
-              </button>
-              <button @click="openExportDataDialog" class="btn btn-secondary">
-                {{ selIds.length ? t('admin.accounts.dataExportSelected') : t('admin.accounts.dataExport') }}
-              </button>
             </template>
           </AccountTableActions>
         </div>
@@ -450,9 +454,9 @@ const togglingSchedulable = ref<number | null>(null)
 const menu = reactive<{show:boolean, acc:Account|null, pos:{top:number, left:number}|null}>({ show: false, acc: null, pos: null })
 const exportingData = ref(false)
 
-// Column settings
-const showColumnDropdown = ref(false)
-const columnDropdownRef = ref<HTMLElement | null>(null)
+// More actions dropdown (合并低频按钮：导入/导出/错误透传/TLS指纹/列设置)
+const showMoreDropdown = ref(false)
+const moreDropdownRef = ref<HTMLElement | null>(null)
 const hiddenColumns = reactive<Set<string>>(new Set())
 const DEFAULT_HIDDEN_COLUMNS = ['today_stats', 'proxy', 'notes', 'priority', 'rate_multiplier']
 const HIDDEN_COLUMNS_KEY = 'account-hidden-columns'
@@ -1460,11 +1464,11 @@ const handleScroll = () => {
   menu.show = false
 }
 
-// 点击外部关闭列设置下拉菜单
+// 点击外部关闭下拉菜单
 const handleClickOutside = (event: MouseEvent) => {
   const target = event.target as HTMLElement
-  if (columnDropdownRef.value && !columnDropdownRef.value.contains(target)) {
-    showColumnDropdown.value = false
+  if (moreDropdownRef.value && !moreDropdownRef.value.contains(target)) {
+    showMoreDropdown.value = false
   }
   if (autoRefreshDropdownRef.value && !autoRefreshDropdownRef.value.contains(target)) {
     showAutoRefreshDropdown.value = false
