@@ -303,6 +303,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		for {
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 			if err != nil {
+				if errors.Is(err, service.ErrClaudeCodeOnly) {
+					h.handleStreamingAwareError(c, http.StatusForbidden, "permission_error",
+						"This group only accepts Claude Code clients; current request was not recognized as Claude Code traffic.", streamStarted)
+					return
+				}
 				if len(fs.FailedAccountIDs) == 0 {
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts: "+err.Error(), streamStarted)
 					return
@@ -526,6 +531,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// 选择支持该模型的账号
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, int64(0))
 			if err != nil {
+				if errors.Is(err, service.ErrClaudeCodeOnly) {
+					h.handleStreamingAwareError(c, http.StatusForbidden, "permission_error",
+						"This group only accepts Claude Code clients; current request was not recognized as Claude Code traffic.", streamStarted)
+					return
+				}
 				if len(fs.FailedAccountIDs) == 0 {
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts: "+err.Error(), streamStarted)
 					return
