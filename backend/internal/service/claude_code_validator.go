@@ -610,6 +610,74 @@ var uaExternalSuffixPattern = regexp.MustCompile(`(?i)\(external,\s*cli\)`)
 // logs reuse it on every invocation.
 var systemPreviewNewlineReplacer = strings.NewReplacer("\r", "⏎", "\n", "⏎")
 
+// msg0BlockHeadRunes is the rune budget for each block-head preview written
+// into the Step 4.4 reject log. Just enough to identify wrapper prefixes
+// like <system-reminder>, <local-command-*>, <command-name>, <session>
+// without leaking meaningful user content.
+const msg0BlockHeadRunes = 24
+
+// describeMsg0ContentBlocks renders a compact, human-greppable layout of
+// messages[0].content for Step 4.4 reject logs. Each block becomes
+// "<idx>:<kind>:len=<rune-count>:<head>" with non-text blocks logging only
+// their type and text blocks revealing the first msg0BlockHeadRunes runes
+// (newlines collapsed via systemPreviewNewlineReplacer). Pieces are
+// separated by "|".
+//
+// Returned "" when body / messages / msg[0].content cannot be inspected,
+// which is itself a useful diagnostic signal.
+func describeMsg0ContentBlocks(body map[string]any) string {
+	if body == nil {
+		return ""
+	}
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return ""
+	}
+	m0, ok := msgs[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	content, ok := m0["content"].([]any)
+	if !ok {
+		return ""
+	}
+
+	var sb strings.Builder
+	for i, item := range content {
+		if i > 0 {
+			sb.WriteByte('|')
+		}
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteByte(':')
+
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			sb.WriteString("non_object")
+			continue
+		}
+		typ, _ := itemMap["type"].(string)
+		if typ == "" {
+			typ = "untyped"
+		}
+		if typ != "text" {
+			sb.WriteString(typ)
+			continue
+		}
+
+		text, _ := itemMap["text"].(string)
+		runes := []rune(text)
+		sb.WriteString("text:len=")
+		sb.WriteString(strconv.Itoa(len(runes)))
+		sb.WriteString(":head=")
+		head := runes
+		if len(head) > msg0BlockHeadRunes {
+			head = head[:msg0BlockHeadRunes]
+		}
+		sb.WriteString(systemPreviewNewlineReplacer.Replace(string(head)))
+	}
+	return sb.String()
+}
+
 // buildRejectShape 在每条 reject 日志附带统一的请求指纹快照。所有字段以
 // shape_ 前缀打头，便于日志检索与聚合分析（"哪些版本/UA 后缀/header 组合
 // 对应哪类 reject"）。
@@ -720,7 +788,8 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 			"ua_version", uaVersion,
 			"parsed_suffix", parsedSuffix,
 			"expected_suffix", expected,
-			"first_user_text_runes", utf8.RuneCountInString(firstUserText))
+			"first_user_text_runes", utf8.RuneCountInString(firstUserText),
+			"msg0_blocks", describeMsg0ContentBlocks(body))
 		return false
 	}
 	return true

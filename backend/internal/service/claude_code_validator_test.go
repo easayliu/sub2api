@@ -590,3 +590,132 @@ func TestExtractFirstUserMessageTextFromMap(t *testing.T) {
 		require.Equal(t, "real", extractFirstUserMessageTextFromMap(body))
 	})
 }
+
+func TestDescribeMsg0ContentBlocks(t *testing.T) {
+	t.Run("nil body returns empty", func(t *testing.T) {
+		require.Equal(t, "", describeMsg0ContentBlocks(nil))
+	})
+
+	t.Run("missing messages returns empty", func(t *testing.T) {
+		require.Equal(t, "", describeMsg0ContentBlocks(map[string]any{}))
+	})
+
+	t.Run("string-content msg[0] returns empty (not an array)", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		}
+		require.Equal(t, "", describeMsg0ContentBlocks(body))
+	})
+
+	t.Run("renders text blocks with len + truncated head", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder>\nfoo\n</system-reminder>"},
+						map[string]any{"type": "text", "text": "<command-name>/clear</command-name>"},
+						map[string]any{"type": "text", "text": "hi"},
+					},
+				},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Contains(t, got, "0:text:len=40:head=<system-reminder>⏎foo⏎</")
+		require.Contains(t, got, "1:text:len=35:head=<command-name>/clear</co")
+		require.Contains(t, got, "2:text:len=2:head=hi")
+		require.Contains(t, got, "|")
+	})
+
+	t.Run("head is truncated to msg0BlockHeadRunes runes", func(t *testing.T) {
+		long := strings.Repeat("a", msg0BlockHeadRunes+50)
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": long},
+					},
+				},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		expectedHead := strings.Repeat("a", msg0BlockHeadRunes)
+		require.Contains(t, got, "head="+expectedHead)
+		require.NotContains(t, got, expectedHead+"a", "truncation must cap head at msg0BlockHeadRunes")
+	})
+
+	t.Run("non-text blocks log only their type", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image", "source": map[string]any{}},
+						map[string]any{"type": "tool_result", "tool_use_id": "x", "content": "y"},
+						map[string]any{"type": "text", "text": "real"},
+					},
+				},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Equal(t, "0:image|1:tool_result|2:text:len=4:head=real", got)
+	})
+
+	t.Run("non-object content element renders as non_object", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						"plain string element",
+						map[string]any{"type": "text", "text": "x"},
+					},
+				},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Equal(t, "0:non_object|1:text:len=1:head=x", got)
+	})
+
+	t.Run("untyped text element renders as untyped", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"text": "no type field"},
+					},
+				},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Equal(t, "0:untyped", got)
+	})
+
+	t.Run("mirrors capture 025 /clear shape", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder>a</system-reminder>"},
+						map[string]any{"type": "text", "text": "<local-command-caveat>caveat</local-command-caveat>"},
+						map[string]any{"type": "text", "text": "<command-name>/clear</command-name>"},
+						map[string]any{"type": "text", "text": "<local-command-stdout></local-command-stdout>"},
+						map[string]any{"type": "text", "text": "nihao"},
+					},
+				},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Contains(t, got, "0:text:")
+		require.Contains(t, got, "head=<system-reminder>a<")
+		require.Contains(t, got, "head=<local-command-cave")
+		require.Contains(t, got, "head=<command-name>/clear")
+		require.Contains(t, got, "head=<local-command-stdo")
+		require.Contains(t, got, "4:text:len=5:head=nihao")
+	})
+}
