@@ -753,8 +753,9 @@ func findBillingHeaderText(body map[string]any) (string, bool) {
 }
 
 // extractFirstUserMessageTextFromMap 是 extractFirstUserMessageText 的 map 版，
-// 用于 validator 直接消费已解析后的 body。语义保持一致：取第一条 role==user
-// 消息的最后一个 text 内容块。
+// 供 validator 直接消费已解析后的 body。采样规则与 bytes 版完全一致：取第
+// 一条 role==user 消息中、第一个不以 billingHeaderSampleSkipPrefixes 起首
+// 的 text 块（用 pickBillingHeaderSampleText）。
 func extractFirstUserMessageTextFromMap(body map[string]any) string {
 	if body == nil {
 		return ""
@@ -775,7 +776,7 @@ func extractFirstUserMessageTextFromMap(body map[string]any) string {
 		case string:
 			return content
 		case []any:
-			var last string
+			var texts []string
 			for _, item := range content {
 				itemMap, ok := item.(map[string]any)
 				if !ok {
@@ -785,10 +786,10 @@ func extractFirstUserMessageTextFromMap(body map[string]any) string {
 					continue
 				}
 				if text, ok := itemMap["text"].(string); ok {
-					last = text
+					texts = append(texts, text)
 				}
 			}
-			return last
+			return pickBillingHeaderSampleText(texts)
 		}
 		return ""
 	}

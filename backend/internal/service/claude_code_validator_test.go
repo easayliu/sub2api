@@ -495,3 +495,98 @@ func TestClaudeCodeValidator_SetStrictCCVersionSettings_RealProviderRespectsValu
 	require.True(t, v.strictCCVersionEnabled(context.Background()),
 		"provider 替换后新值应即时生效")
 }
+
+func TestExtractFirstUserMessageTextFromMap(t *testing.T) {
+	t.Run("nil body returns empty", func(t *testing.T) {
+		require.Equal(t, "", extractFirstUserMessageTextFromMap(nil))
+	})
+
+	t.Run("messages missing returns empty", func(t *testing.T) {
+		require.Equal(t, "", extractFirstUserMessageTextFromMap(map[string]any{}))
+	})
+
+	t.Run("string content returned directly", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		}
+		require.Equal(t, "hello", extractFirstUserMessageTextFromMap(body))
+	})
+
+	t.Run("skips system-reminder, returns first non-skipped block", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder>x</system-reminder>"},
+						map[string]any{"type": "text", "text": "real input"},
+					},
+				},
+			},
+		}
+		require.Equal(t, "real input", extractFirstUserMessageTextFromMap(body))
+	})
+
+	t.Run("/clear scenario: samples <command-name>/clear block, not trailing user text", func(t *testing.T) {
+		// Mirrors capture/0521/025 block structure: 4 system-reminders, a
+		// <local-command-caveat>, the <command-name>/clear, a
+		// <local-command-stdout>, then the user's next-turn input. The map
+		// extractor must agree with the bytes version on the /clear block.
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder>a</system-reminder>"},
+						map[string]any{"type": "text", "text": "<system-reminder>b</system-reminder>"},
+						map[string]any{"type": "text", "text": "<system-reminder>c</system-reminder>"},
+						map[string]any{"type": "text", "text": "<system-reminder>d</system-reminder>"},
+						map[string]any{"type": "text", "text": "<local-command-caveat>caveat</local-command-caveat>"},
+						map[string]any{"type": "text", "text": "<command-name>/clear</command-name>"},
+						map[string]any{"type": "text", "text": "<local-command-stdout></local-command-stdout>"},
+						map[string]any{"type": "text", "text": "nihao"},
+					},
+				},
+			},
+		}
+		require.Equal(t,
+			"<command-name>/clear</command-name>",
+			extractFirstUserMessageTextFromMap(body))
+	})
+
+	t.Run("compact next turn: samples compact summary block, not user input", func(t *testing.T) {
+		// Mirrors capture/0521/014 / 028 / 040.
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder>a</system-reminder>"},
+						map[string]any{"type": "text", "text": "<system-reminder>b</system-reminder>"},
+						map[string]any{"type": "text", "text": "<system-reminder>c</system-reminder>"},
+						map[string]any{"type": "text", "text": "This session is being continued..."},
+						map[string]any{"type": "text", "text": "<local-command-caveat>caveat</local-command-caveat>"},
+						map[string]any{"type": "text", "text": "<command-name>/compact</command-name>"},
+						map[string]any{"type": "text", "text": "<local-command-stdout>Compacted</local-command-stdout>"},
+						map[string]any{"type": "text", "text": "nihaowe"},
+					},
+				},
+			},
+		}
+		require.Equal(t,
+			"This session is being continued...",
+			extractFirstUserMessageTextFromMap(body))
+	})
+
+	t.Run("skips non-user messages", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "assistant", "content": "ignored"},
+				map[string]any{"role": "user", "content": "real"},
+			},
+		}
+		require.Equal(t, "real", extractFirstUserMessageTextFromMap(body))
+	})
+}

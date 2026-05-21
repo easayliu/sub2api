@@ -24,6 +24,48 @@ const billingHeaderSuffixSalt = "59cf53e54c78"
 // first user message text used as input to the cc_version suffix hash.
 var billingHeaderSuffixPositions = [...]int{4, 7, 20}
 
+// billingHeaderSampleSkipPrefixes lists text-block prefixes the official CLI
+// skips when picking the "first user message text" that feeds the suffix
+// hash. They mark blocks the CLI injects itself (environment scaffolding +
+// local /-command products); the user-authored payload is whichever block
+// comes after them.
+//
+// Verified against capture/0521 (compact + /clear scenarios): for /clear
+// turns CLI samples the <command-name>/clear...</command-name> block, so
+// <command-name> intentionally stays out of this skip list — only the
+// strictly CLI-internal wrappers are skipped.
+var billingHeaderSampleSkipPrefixes = []string{
+	"<system-reminder>",
+	"<local-",
+}
+
+// pickBillingHeaderSampleText selects, from text-block contents in
+// messages[0].content order, the first block whose text does not start with
+// any prefix in billingHeaderSampleSkipPrefixes. Falls back to the last
+// entry if every block is skipped (defensive; real CLI traffic always
+// leaves at least one payload block).
+func pickBillingHeaderSampleText(texts []string) string {
+	for _, t := range texts {
+		if billingHeaderSampleTextShouldSkip(t) {
+			continue
+		}
+		return t
+	}
+	if n := len(texts); n > 0 {
+		return texts[n-1]
+	}
+	return ""
+}
+
+func billingHeaderSampleTextShouldSkip(text string) bool {
+	for _, p := range billingHeaderSampleSkipPrefixes {
+		if strings.HasPrefix(text, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // ccEntrypointRe matches cc_entrypoint=<value> inside an x-anthropic-billing-header
 // text block. Scoped to the header prefix to avoid touching user content.
 var ccEntrypointRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcc_entrypoint=)([A-Za-z0-9_-]+)(\s*;)`)
@@ -69,12 +111,15 @@ func computeBillingHeaderSuffix(body []byte, version string) string {
 
 // extractFirstUserMessageText returns the user-authored text of the first
 // message whose role is "user". If content is a string, returns it directly.
-// If content is an array, returns the text of the LAST "text" block — the
-// CLI prepends <system-reminder> wrapper blocks to each user turn, and the
-// real user input always ends up as the final text block. Verified against
-// direct CLI captures (e.g. cc_version suffix .069 requires sampling the
-// trailing "你好" block, not the leading system-reminder block).
-// Returns "" when the first user message has no text blocks.
+// If content is an array, picks the first text block whose content does not
+// start with a CLI-injected wrapper prefix (see
+// billingHeaderSampleSkipPrefixes) — i.e. skipping <system-reminder> and
+// <local-command-*> blocks, but keeping <command-name> (user-issued slash
+// commands), <session> compact summaries, and plain text. Returns "" when
+// the first user message has no text blocks.
+//
+// Selection rule verified against capture/0521 across normal, compact, and
+// /clear turns: the CLI's cc_version suffix is derived from this block.
 func extractFirstUserMessageText(body []byte) string {
 	msgs := gjson.GetBytes(body, "messages")
 	if !msgs.Exists() || !msgs.IsArray() {
@@ -90,12 +135,14 @@ func extractFirstUserMessageText(body []byte) string {
 		case content.Type == gjson.String:
 			out = content.String()
 		case content.IsArray():
+			var texts []string
 			content.ForEach(func(_, item gjson.Result) bool {
 				if item.Get("type").String() == "text" {
-					out = item.Get("text").String()
+					texts = append(texts, item.Get("text").String())
 				}
-				return true // keep iterating; keep last text block
+				return true
 			})
+			out = pickBillingHeaderSampleText(texts)
 		}
 		return false // stop after first user message
 	})

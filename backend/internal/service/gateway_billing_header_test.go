@@ -29,14 +29,14 @@ func TestComputeBillingHeaderSuffix(t *testing.T) {
 		assert.Equal(t, "b88", computeBillingHeaderSuffix(body, "2.1.77"))
 	})
 
-	t.Run("content as array uses last text block", func(t *testing.T) {
+	t.Run("content as array (single block) samples that block", func(t *testing.T) {
 		body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"Hello, how are you?"}]}]}`)
 		assert.Equal(t, "b88", computeBillingHeaderSuffix(body, "2.1.77"))
 	})
 
-	t.Run("array with system-reminder prefix blocks samples last (real) block", func(t *testing.T) {
+	t.Run("system-reminder prefix blocks are skipped", func(t *testing.T) {
 		// CLI prepends <system-reminder> blocks to every user turn; the real
-		// user input is the trailing block. The suffix must sample that one.
+		// user input is the first non-skipped block.
 		body := []byte(`{"messages":[{"role":"user","content":[
 			{"type":"text","text":"<system-reminder>\nirrelevant prefix\n</system-reminder>"},
 			{"type":"text","text":"<system-reminder>\nanother prefix block here\n</system-reminder>"},
@@ -115,6 +115,112 @@ func TestComputeBillingHeaderSuffix(t *testing.T) {
 		s1 := computeBillingHeaderSuffix(body1, "2.1.110")
 		s2 := computeBillingHeaderSuffix(body2, "2.1.110")
 		assert.NotEqual(t, s1, s2)
+	})
+
+	t.Run("compact next turn: samples compact summary block, not user input", func(t *testing.T) {
+		// capture/0521/014 (CLI 2.1.146, post-/compact next turn):
+		//   [0..2] <system-reminder>...   skipped
+		//   [3]    "This session is being continued from a previous..."  <-- sampled
+		//   [4]    <local-command-caveat>...                              skipped
+		//   [5]    <command-name>/compact</command-name>...               kept but [3] wins
+		//   [6]    <local-command-stdout>...                              skipped
+		//   [7]    "nihaowe"                                              user input, ignored
+		// Block [3] rune[4]/[7]/[20] = ' ', 's', 'g' -> chars=" sg" -> 75f.
+		body := []byte(`{"messages":[{"role":"user","content":[
+			{"type":"text","text":"<system-reminder>\nirrelevant\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nmore stuff\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nskills etc\n</system-reminder>"},
+			{"type":"text","text":"This session is being continued from a previous conversation that ran out of context"},
+			{"type":"text","text":"<local-command-caveat>Caveat: ...</local-command-caveat>"},
+			{"type":"text","text":"<command-name>/compact</command-name>"},
+			{"type":"text","text":"<local-command-stdout>Compacted</local-command-stdout>"},
+			{"type":"text","text":"nihaowe"}
+		]}]}`)
+		assert.Equal(t, "75f", computeBillingHeaderSuffix(body, "2.1.146"))
+	})
+
+	t.Run("clear next turn: samples <command-name>/clear block", func(t *testing.T) {
+		// capture/0521/025 and 036 (CLI 2.1.146, post-/clear next turn):
+		//   [0..3] <system-reminder>...   skipped
+		//   [4]    <local-command-caveat> skipped (<local- prefix)
+		//   [5]    "<command-name>/clear</command-name>..."  <-- sampled
+		//   [6]    <local-command-stdout> skipped
+		//   [7]    user input             ignored
+		// 036 used "你睡", 025 used "nihao"; both yield 793 because the sample
+		// is the /clear command-name block, not the user's new text.
+		// Block [5] rune[4]/[7]/[20] = 'm', 'd', '<' -> chars="md<" -> 793.
+		body := []byte(`{"messages":[{"role":"user","content":[
+			{"type":"text","text":"<system-reminder>\ntools\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nmcp\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nskills\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\ncontext\n</system-reminder>"},
+			{"type":"text","text":"<local-command-caveat>Caveat: ...</local-command-caveat>"},
+			{"type":"text","text":"<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"},
+			{"type":"text","text":"<local-command-stdout></local-command-stdout>"},
+			{"type":"text","text":"你睡"}
+		]}]}`)
+		assert.Equal(t, "793", computeBillingHeaderSuffix(body, "2.1.146"))
+	})
+
+	t.Run("compact summary single block: samples it directly", func(t *testing.T) {
+		// capture/0521/007 and 039 (CLI 2.1.146, the request that delivers the
+		// compact summary itself): messages[0].content is a single text block
+		// starting with "<session>\nThis session is being continued...".
+		// Suffix is 037 for 2.1.146; chars at [4]/[7]/[20] = 's', 'n', 'o'.
+		body := []byte(`{"messages":[{"role":"user","content":[
+			{"type":"text","text":"<session>\nThis session is being continued from a previous conversation"}
+		]}]}`)
+		assert.Equal(t, "037", computeBillingHeaderSuffix(body, "2.1.146"))
+	})
+}
+
+func TestPickBillingHeaderSampleText(t *testing.T) {
+	t.Run("empty list returns empty string", func(t *testing.T) {
+		assert.Equal(t, "", pickBillingHeaderSampleText(nil))
+		assert.Equal(t, "", pickBillingHeaderSampleText([]string{}))
+	})
+
+	t.Run("single non-skipped block is returned", func(t *testing.T) {
+		assert.Equal(t, "hello", pickBillingHeaderSampleText([]string{"hello"}))
+	})
+
+	t.Run("skips system-reminder prefix", func(t *testing.T) {
+		got := pickBillingHeaderSampleText([]string{
+			"<system-reminder>foo</system-reminder>",
+			"real input",
+		})
+		assert.Equal(t, "real input", got)
+	})
+
+	t.Run("skips <local- prefix (caveat and stdout)", func(t *testing.T) {
+		got := pickBillingHeaderSampleText([]string{
+			"<system-reminder>x</system-reminder>",
+			"<local-command-caveat>...</local-command-caveat>",
+			"<command-name>/clear</command-name>",
+			"<local-command-stdout></local-command-stdout>",
+			"user input",
+		})
+		assert.Equal(t, "<command-name>/clear</command-name>", got)
+	})
+
+	t.Run("does not skip <command-name> blocks", func(t *testing.T) {
+		// <command-name> represents the slash command the user typed; CLI
+		// keys the suffix off this block when running /clear (see captures
+		// 025/026/036/038). Only <system-reminder> and <local-* prefixes
+		// are dropped.
+		got := pickBillingHeaderSampleText([]string{
+			"<command-name>/clear</command-name>",
+			"<local-command-stdout></local-command-stdout>",
+		})
+		assert.Equal(t, "<command-name>/clear</command-name>", got)
+	})
+
+	t.Run("falls back to last entry when every block is skipped", func(t *testing.T) {
+		got := pickBillingHeaderSampleText([]string{
+			"<system-reminder>a</system-reminder>",
+			"<local-command-stdout></local-command-stdout>",
+		})
+		assert.Equal(t, "<local-command-stdout></local-command-stdout>", got)
 	})
 }
 
