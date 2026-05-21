@@ -87,6 +87,13 @@ func claudeCodeBodyMapFromParsedRequest(parsedReq *service.ParsedRequest) map[st
 	if len(parsedReq.Messages) > 0 {
 		bodyMap["messages"] = parsedReq.Messages
 	}
+	// output_config.format.type is the fingerprint Step 3.6 uses to bypass
+	// CC's haiku title-generation requests (structured-outputs beta).
+	if parsedReq.OutputFormatType != "" {
+		bodyMap["output_config"] = map[string]any{
+			"format": map[string]any{"type": parsedReq.OutputFormatType},
+		}
+	}
 	return bodyMap
 }
 

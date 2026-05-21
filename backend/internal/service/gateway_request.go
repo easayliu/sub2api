@@ -63,17 +63,18 @@ type SessionContext struct {
 // 2. 将解析结果 ParsedRequest 传递给 Service 层
 // 3. 避免重复 json.Unmarshal，减少 CPU 和内存开销
 type ParsedRequest struct {
-	Body            []byte          // 原始请求体（保留用于转发）
-	Model           string          // 请求的模型名称
-	Stream          bool            // 是否为流式请求
-	MetadataUserID  string          // metadata.user_id（用于会话亲和）
-	System          any             // system 字段内容
-	Messages        []any           // messages 数组
-	HasSystem       bool            // 是否包含 system 字段（包含 null 也视为显式传入）
-	ThinkingEnabled bool            // 是否开启 thinking（部分平台会影响最终模型名）
-	OutputEffort    string          // output_config.effort（Claude API 的推理强度控制）
-	MaxTokens       int             // max_tokens 值（用于探测请求拦截）
-	SessionContext  *SessionContext // 可选：请求上下文区分因子（nil 时行为不变）
+	Body             []byte          // 原始请求体（保留用于转发）
+	Model            string          // 请求的模型名称
+	Stream           bool            // 是否为流式请求
+	MetadataUserID   string          // metadata.user_id（用于会话亲和）
+	System           any             // system 字段内容
+	Messages         []any           // messages 数组
+	HasSystem        bool            // 是否包含 system 字段（包含 null 也视为显式传入）
+	ThinkingEnabled  bool            // 是否开启 thinking（部分平台会影响最终模型名）
+	OutputEffort     string          // output_config.effort（Claude API 的推理强度控制）
+	OutputFormatType string          // output_config.format.type（"json_schema" 时 CC 走结构化输出，CC 标题生成的指纹）
+	MaxTokens        int             // max_tokens 值（用于探测请求拦截）
+	SessionContext   *SessionContext // 可选：请求上下文区分因子（nil 时行为不变）
 
 	// OnUpstreamAccepted 上游接受请求后立即调用（用于提前释放串行锁）
 	// 流式请求在收到 2xx 响应头后调用，避免持锁等流完成
@@ -173,6 +174,9 @@ func ParseGatewayRequest(body []byte, protocol string) (*ParsedRequest, error) {
 
 	// output_config.effort: Claude API 的推理强度控制参数
 	parsed.OutputEffort = strings.TrimSpace(gjson.Get(jsonStr, "output_config.effort").String())
+
+	// output_config.format.type: 用于识别 CC 标题生成（structured-outputs beta，json_schema）
+	parsed.OutputFormatType = strings.TrimSpace(gjson.Get(jsonStr, "output_config.format.type").String())
 
 	// max_tokens: 仅接受整数值
 	maxTokensResult := gjson.Get(jsonStr, "max_tokens")

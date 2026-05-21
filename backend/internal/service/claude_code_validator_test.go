@@ -282,6 +282,78 @@ func TestClaudeCodeValidator_ProbeBypassRequiresUA(t *testing.T) {
 	require.False(t, ok)
 }
 
+// CC issues haiku title-generation requests with output_config.format.type
+// == "json_schema"; they drop claude-code-20250219 from anthropic-beta which
+// would otherwise fail 4.2. Step 3.6 bypasses these once UA matches.
+// Shape based on capture/011_215059_api.anthropic.com:443_v1_messages?beta=true.json.
+func TestClaudeCodeValidator_HaikuTitleGenBypass(t *testing.T) {
+	validator := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+	req.Header.Set("User-Agent", "claude-cli/2.1.100 (external, cli)")
+
+	ok := validator.Validate(req, map[string]any{
+		"model":      "claude-haiku-4-5-20251001",
+		"max_tokens": 32000,
+		"output_config": map[string]any{
+			"format": map[string]any{
+				"type": "json_schema",
+				"schema": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"title": map[string]any{"type": "string"}},
+					"required":   []any{"title"},
+				},
+			},
+		},
+	})
+	require.True(t, ok)
+}
+
+// Bypass requires UA to match the CLI pattern — Step 1 still gates.
+func TestClaudeCodeValidator_HaikuTitleGenBypassRequiresUA(t *testing.T) {
+	validator := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+	req.Header.Set("User-Agent", "curl/8.0.0")
+
+	ok := validator.Validate(req, map[string]any{
+		"model": "claude-haiku-4-5-20251001",
+		"output_config": map[string]any{
+			"format": map[string]any{"type": "json_schema"},
+		},
+	})
+	require.False(t, ok)
+}
+
+// output_config present but format.type != "json_schema" (e.g. only an effort
+// hint) is not the title-gen fingerprint and must still go through Step 4.
+func TestClaudeCodeValidator_HaikuOutputConfigWithoutJSONSchemaStillStrict(t *testing.T) {
+	validator := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+	req.Header.Set("User-Agent", "claude-cli/2.1.100 (external, cli)")
+
+	ok := validator.Validate(req, map[string]any{
+		"model": "claude-haiku-4-5-20251001",
+		"output_config": map[string]any{
+			"format": map[string]any{"type": "text"},
+		},
+	})
+	require.False(t, ok)
+}
+
+// A user choosing haiku as their primary model (no output_config) must still
+// pass strict Step 4 validation — guards against false-bypassing real haiku
+// chats (see capture/0508/019_*.json).
+func TestClaudeCodeValidator_HaikuWithoutOutputConfigStillStrict(t *testing.T) {
+	validator := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+	req.Header.Set("User-Agent", "claude-cli/2.1.133 (external, cli)")
+
+	ok := validator.Validate(req, map[string]any{
+		"model":      "claude-haiku-4-5-20251001",
+		"max_tokens": 32000,
+	})
+	require.False(t, ok)
+}
+
 func TestClaudeCodeValidator_MessagesWithoutProbeStillNeedStrictValidation(t *testing.T) {
 	validator := NewClaudeCodeValidator()
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)

@@ -278,6 +278,19 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 		return true
 	}
 
+	// Step 3.6: bypass for Claude Code haiku title-generation requests.
+	// CC issues these to summarize a conversation into a short title via the
+	// structured-outputs beta (json_schema output_config); the request drops
+	// claude-code-20250219 from anthropic-beta, which would otherwise fail
+	// Step 4.2. Confirmed by capture/011 (CC 2.1.100): model=haiku,
+	// output_config.format.type="json_schema", anthropic-beta lacking the CC
+	// token. Pairing the haiku-model check with json_schema output_config
+	// avoids false-bypassing the case where a user runs haiku as the primary
+	// model (capture/0508/019), which does carry the CC beta token.
+	if isClaudeCodeHaikuTitleGenRequest(body) {
+		return true
+	}
+
 	// Step 4: messages 路径，进行严格验证
 
 	// 4.1 检查 system prompt 相似度。
@@ -386,6 +399,33 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	}
 
 	return true
+}
+
+// isClaudeCodeHaikuTitleGenRequest detects CC's haiku-driven title generation
+// request shape. CC routes these short summarization calls to haiku and uses
+// the structured-outputs beta to constrain the response to {"title": "..."},
+// which on the wire shows up as output_config.format.type == "json_schema".
+// The combination of model=haiku + json_schema output_config is unique to
+// these internal calls — a user picking haiku as their primary model does
+// not emit output_config (verified via capture/0508/019).
+func isClaudeCodeHaikuTitleGenRequest(body map[string]any) bool {
+	if body == nil {
+		return false
+	}
+	model, _ := body["model"].(string)
+	if !strings.Contains(strings.ToLower(model), "haiku") {
+		return false
+	}
+	outputConfig, ok := body["output_config"].(map[string]any)
+	if !ok {
+		return false
+	}
+	format, ok := outputConfig["format"].(map[string]any)
+	if !ok {
+		return false
+	}
+	formatType, _ := format["type"].(string)
+	return formatType == "json_schema"
 }
 
 // validateEnvBlock 校验 system 中含 envBlockSentinel 段的环境信息合法性。
@@ -604,7 +644,10 @@ func buildRejectShape(r *http.Request, body map[string]any) []any {
 
 	metaKind, userIDPresent, userIDFormat := classifyMetadataShape(body)
 
+	model, _ := body["model"].(string)
+
 	return []any{
+		"shape_model", model,
 		"shape_ua_version", uaVersion,
 		"shape_ua_external", uaExternal,
 		"shape_x_app", r.Header.Get("X-App"),
