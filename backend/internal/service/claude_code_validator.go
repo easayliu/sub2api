@@ -617,31 +617,70 @@ var systemPreviewNewlineReplacer = strings.NewReplacer("\r", "⏎", "\n", "⏎")
 const msg0BlockHeadRunes = 24
 
 // describeMsg0ContentBlocks renders a compact, human-greppable layout of
-// messages[0].content for Step 4.4 reject logs. Each block becomes
-// "<idx>:<kind>:len=<rune-count>:<head>" with non-text blocks logging only
-// their type and text blocks revealing the first msg0BlockHeadRunes runes
-// (newlines collapsed via systemPreviewNewlineReplacer). Pieces are
-// separated by "|".
+// messages[0].content for Step 4.4 reject logs. Output forms:
 //
-// Returned "" when body / messages / msg[0].content cannot be inspected,
-// which is itself a useful diagnostic signal.
+//   - "no_messages"                       — messages array missing/empty
+//   - "msg0_non_object"                   — msg[0] is not an object
+//   - "no_content"                        — msg[0] lacks a content field
+//   - "content_null"                      — content key present but null
+//   - "content_string:len=N:head=<24r>"   — content is a string (forgery
+//     tell — real CLI always uses array form for the first user message)
+//   - "content_wrong_type:<go-type>"      — content is something else
+//   - "<i>:<kind>:len=N:head=<24r>"       — per-block, joined by "|", when
+//     content is an array; non-text blocks show only their type
+//
+// Newlines in head previews are collapsed via systemPreviewNewlineReplacer.
+// Returned "" only when body itself is nil (the caller should never pass
+// nil after upstream validation, but the guard stays for safety).
 func describeMsg0ContentBlocks(body map[string]any) string {
 	if body == nil {
 		return ""
 	}
 	msgs, ok := body["messages"].([]any)
 	if !ok || len(msgs) == 0 {
-		return ""
+		return "no_messages"
 	}
 	m0, ok := msgs[0].(map[string]any)
 	if !ok {
-		return ""
+		return "msg0_non_object"
 	}
-	content, ok := m0["content"].([]any)
-	if !ok {
-		return ""
+	rawContent, exists := m0["content"]
+	if !exists {
+		return "no_content"
+	}
+	if rawContent == nil {
+		return "content_null"
 	}
 
+	switch content := rawContent.(type) {
+	case string:
+		return formatStringContentPreview(content)
+	case []any:
+		return formatArrayContentPreview(content)
+	default:
+		return "content_wrong_type:" + reflect.TypeOf(rawContent).String()
+	}
+}
+
+// formatStringContentPreview renders the diagnostic line for a string-form
+// messages[0].content. Real CLI never sends string form for the first user
+// message, so seeing this is itself a forgery tell.
+func formatStringContentPreview(content string) string {
+	runes := []rune(content)
+	head := runes
+	if len(head) > msg0BlockHeadRunes {
+		head = head[:msg0BlockHeadRunes]
+	}
+	return "content_string:len=" + strconv.Itoa(len(runes)) +
+		":head=" + systemPreviewNewlineReplacer.Replace(string(head))
+}
+
+// formatArrayContentPreview renders the per-block layout for an array-form
+// messages[0].content.
+func formatArrayContentPreview(content []any) string {
+	if len(content) == 0 {
+		return "content_empty_array"
+	}
 	var sb strings.Builder
 	for i, item := range content {
 		if i > 0 {

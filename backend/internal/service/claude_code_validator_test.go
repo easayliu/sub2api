@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -596,17 +597,85 @@ func TestDescribeMsg0ContentBlocks(t *testing.T) {
 		require.Equal(t, "", describeMsg0ContentBlocks(nil))
 	})
 
-	t.Run("missing messages returns empty", func(t *testing.T) {
-		require.Equal(t, "", describeMsg0ContentBlocks(map[string]any{}))
+	t.Run("missing messages returns no_messages", func(t *testing.T) {
+		require.Equal(t, "no_messages", describeMsg0ContentBlocks(map[string]any{}))
 	})
 
-	t.Run("string-content msg[0] returns empty (not an array)", func(t *testing.T) {
+	t.Run("empty messages returns no_messages", func(t *testing.T) {
+		body := map[string]any{"messages": []any{}}
+		require.Equal(t, "no_messages", describeMsg0ContentBlocks(body))
+	})
+
+	t.Run("msg[0] not an object", func(t *testing.T) {
+		body := map[string]any{"messages": []any{"plain string"}}
+		require.Equal(t, "msg0_non_object", describeMsg0ContentBlocks(body))
+	})
+
+	t.Run("msg[0] without content field", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{map[string]any{"role": "user"}},
+		}
+		require.Equal(t, "no_content", describeMsg0ContentBlocks(body))
+	})
+
+	t.Run("msg[0].content is null", func(t *testing.T) {
 		body := map[string]any{
 			"messages": []any{
-				map[string]any{"role": "user", "content": "hello"},
+				map[string]any{"role": "user", "content": nil},
 			},
 		}
-		require.Equal(t, "", describeMsg0ContentBlocks(body))
+		require.Equal(t, "content_null", describeMsg0ContentBlocks(body))
+	})
+
+	t.Run("string content renders content_string with len and head", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello world this is a string"},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Equal(t, "content_string:len=28:head=hello world this is a st", got)
+	})
+
+	t.Run("long string content truncates head to msg0BlockHeadRunes", func(t *testing.T) {
+		long := strings.Repeat("a", msg0BlockHeadRunes+50)
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": long},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		expectedHead := strings.Repeat("a", msg0BlockHeadRunes)
+		require.Equal(t, "content_string:len="+strconv.Itoa(msg0BlockHeadRunes+50)+":head="+expectedHead, got)
+	})
+
+	t.Run("string content with newline collapses to ⏎", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "line1\nline2"},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Contains(t, got, "head=line1⏎line2")
+	})
+
+	t.Run("content as int renders content_wrong_type", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": 42},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Equal(t, "content_wrong_type:int", got)
+	})
+
+	t.Run("empty array content renders content_empty_array", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{}},
+			},
+		}
+		require.Equal(t, "content_empty_array", describeMsg0ContentBlocks(body))
 	})
 
 	t.Run("renders text blocks with len + truncated head", func(t *testing.T) {
