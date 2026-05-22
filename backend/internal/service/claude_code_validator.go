@@ -803,20 +803,26 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 
 	billingText, ok := findBillingHeaderText(body)
 	if !ok {
-		logRejectedWithShape(r, body, "4.4_cc_version", "billing_header_missing", "ua_version", uaVersion)
+		logRejectedWithShape(r, body, "4.4_cc_version", "billing_header_missing",
+			"ua_version", uaVersion,
+			"msg0_blocks", describeMsg0ContentBlocks(body))
 		return false
 	}
 
 	matches := ccVersionParseRe.FindStringSubmatch(billingText)
 	if matches == nil {
 		logRejectedWithShape(r, body, "4.4_cc_version", "cc_version_unparseable",
-			"ua_version", uaVersion, "billing_text", billingText)
+			"ua_version", uaVersion,
+			"billing_text", billingText,
+			"msg0_blocks", describeMsg0ContentBlocks(body))
 		return false
 	}
 	parsedVersion, parsedSuffix := matches[1], matches[2]
 	if parsedVersion != uaVersion {
 		logRejectedWithShape(r, body, "4.4_cc_version", "version_ua_mismatch",
-			"ua_version", uaVersion, "parsed_version", parsedVersion)
+			"ua_version", uaVersion,
+			"parsed_version", parsedVersion,
+			"msg0_blocks", describeMsg0ContentBlocks(body))
 		return false
 	}
 
