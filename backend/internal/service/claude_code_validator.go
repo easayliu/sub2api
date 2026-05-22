@@ -42,10 +42,17 @@ func logRejectedWithShape(r *http.Request, body map[string]any, step, reason str
 	logRejected(r, step, reason, combined...)
 }
 
-// ClaudeCodeStrictSettings 暴露 Step 4.4（cc_version 后三位 SHA256 重算）的可选开关。
-// 注入方式见 NewClaudeCodeValidator / (*ClaudeCodeValidator).SetStrictCCVersionSettings：
-// 未注入或 provider 返回 true → 严格校验（与历史行为一致）；
-// 注入后返回 false → 跳过 4.4，但 4.1~4.3 / 4.5 仍生效，通过后照常标记为 Claude Code 客户端。
+// ClaudeCodeStrictSettings 暴露 Step 4.4 中 cc_version 后三位 SHA256 重算的可选开关。
+// 注入方式见 NewClaudeCodeValidator / (*ClaudeCodeValidator).SetStrictCCVersionSettings。
+//
+// 开关 ONLY 影响最后那一步「parsed_suffix vs sha256(salt+chars+version)[:3]」的比对；
+// billing header 存在性、cc_version 是否能解析、parsed_version 是否与 UA 版本一致
+// 这三项前置检查无论开关如何都强制执行——否则伪造客户端只要省略整段 billing
+// header 就能绕过 4.4。
+//
+//   - 未注入 / provider 返回 true → 严格比对 suffix（与历史行为一致）
+//   - provider 返回 false → 跳过 suffix 比对，前置三项仍生效；通过后照常标记
+//     为 Claude Code 客户端。
 type ClaudeCodeStrictSettings interface {
 	IsStrictCCVersionEnabled(ctx context.Context) bool
 }
@@ -378,15 +385,15 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 		return false
 	}
 
-	// 4.4 校验 system 中 x-anthropic-billing-header 段的 cc_version 后三位。
-	// CLI v2.1.77+ 通过 SHA256(salt + first_user_text[4,7,20] + version)[:3] 派生
-	// 该后缀；伪造客户端要么完全省略 billing header，要么只能写出错误的 suffix。
-	// 仅对发出该 header 的 CLI 版本（>= 2.1.77）强制存在性 + 正确性。
-	// 可通过管理后台 enable_strict_cc_version 关闭此段（4.1~4.3 / 4.5 仍生效）。
-	if v.strictCCVersionEnabled(r.Context()) {
-		if !v.validateBillingHeaderSuffix(r, body) {
-			return false
-		}
+	// 4.4 校验 system 中 x-anthropic-billing-header 段。CLI v2.1.77+ 通过
+	// SHA256(salt + first_user_text[4,7,20] + version)[:3] 派生该后缀；伪造客户
+	// 端要么完全省略 billing header，要么只能写出错误的 suffix。
+	//
+	// validateBillingHeaderSuffix 内部自己读 strictCCVersionEnabled——关掉只会放
+	// 过最后那一步 SHA256 比对，billing header 是否存在、是否能解析、版本是否一
+	// 致这三项**无论开关如何都强制执行**，以保留对最弱伪造的拦截能力。
+	if !v.validateBillingHeaderSuffix(r, body) {
+		return false
 	}
 
 	// 4.5 env block 存在则严格校验。
@@ -786,11 +793,18 @@ func extractEnvLineValue(re *regexp.Regexp, text string) string {
 }
 
 // validateBillingHeaderSuffix 校验请求 body system 中 x-anthropic-billing-header
-// 段的 cc_version 后三位 suffix。返回 false 表示伪造或被篡改。
+// 段的 cc_version 派生后缀。返回 false 表示伪造或被篡改。
 //
-//   - UA version < 2.1.77：兼容旧版本，跳过校验
-//   - billing header 段缺失（在 >= 2.1.77 下）：reject
-//   - cc_version=X.Y.Z.SSS 解析失败、X.Y.Z 与 UA 不一致、SSS 不匹配重算结果：reject
+// 校验顺序（前 4 项不受 strictCCVersionEnabled 开关影响）：
+//   - UA version 无法解析 → reject
+//   - UA version < 2.1.77 → 兼容旧版本，pass
+//   - billing header 段缺失 → reject
+//   - cc_version=X.Y.Z.SSS 解析失败 → reject
+//   - parsed X.Y.Z 与 UA 不一致 → reject
+//
+// 第 5 项「parsed SSS vs sha256(salt+chars+version)[:3]」由开关控制：
+//   - 开关 ON（默认）：mismatch → reject
+//   - 开关 OFF：mismatch → 仍 pass，但记一条 info 级日志便于审计
 func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body map[string]any) bool {
 	uaVersion := ExtractCLIVersion(r.Header.Get("User-Agent"))
 	if uaVersion == "" {
@@ -828,16 +842,28 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 
 	firstUserText := extractFirstUserMessageTextFromMap(body)
 	expected := computeBillingHeaderSuffixFromText(firstUserText, uaVersion)
-	if parsedSuffix != expected {
-		logRejectedWithShape(r, body, "4.4_cc_version", "suffix_mismatch",
+	if parsedSuffix == expected {
+		return true
+	}
+
+	// suffix mismatch — 是否拒绝取决于 strictCCVersionEnabled。
+	if !v.strictCCVersionEnabled(r.Context()) {
+		slog.Info("claude_code_validator_suffix_mismatch_relaxed",
+			"step", "4.4_cc_version",
+			"ua", r.Header.Get("User-Agent"),
 			"ua_version", uaVersion,
 			"parsed_suffix", parsedSuffix,
 			"expected_suffix", expected,
-			"first_user_text_runes", utf8.RuneCountInString(firstUserText),
-			"msg0_blocks", describeMsg0ContentBlocks(body))
-		return false
+			"first_user_text_runes", utf8.RuneCountInString(firstUserText))
+		return true
 	}
-	return true
+	logRejectedWithShape(r, body, "4.4_cc_version", "suffix_mismatch",
+		"ua_version", uaVersion,
+		"parsed_suffix", parsedSuffix,
+		"expected_suffix", expected,
+		"first_user_text_runes", utf8.RuneCountInString(firstUserText),
+		"msg0_blocks", describeMsg0ContentBlocks(body))
+	return false
 }
 
 // findBillingHeaderText 返回 body.system 中以 "x-anthropic-billing-header" 起首

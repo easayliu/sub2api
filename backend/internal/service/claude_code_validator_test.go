@@ -490,11 +490,129 @@ func TestClaudeCodeValidator_SetStrictCCVersionSettings_RealProviderRespectsValu
 	v := NewClaudeCodeValidator()
 	v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: false})
 	require.False(t, v.strictCCVersionEnabled(context.Background()),
-		"真实 provider 返回 false 时应被尊重，跳过 Step 4.4")
+		"真实 provider 返回 false 时应被尊重，跳过 Step 4.4 的 suffix 比对")
 
 	v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: true})
 	require.True(t, v.strictCCVersionEnabled(context.Background()),
 		"provider 替换后新值应即时生效")
+}
+
+// helper: build a request with the given UA and a body that already passes
+// the pre-suffix Step 4.4 checks (billing header parses, version matches UA).
+func newBillingSuffixTestReq(t *testing.T, ua, billingText, firstUserText string) (*http.Request, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+	req.Header.Set("User-Agent", ua)
+	body := map[string]any{
+		"system": []any{
+			map[string]any{"type": "text", "text": billingText},
+		},
+		"messages": []any{
+			map[string]any{
+				"role":    "user",
+				"content": firstUserText,
+			},
+		},
+	}
+	return req, body
+}
+
+func TestValidateBillingHeaderSuffix_PreSuffixChecksAlwaysEnforced(t *testing.T) {
+	// All 4 pre-suffix branches must reject regardless of strict toggle —
+	// they catch the weakest forgeries (no header at all, garbled cc_version,
+	// version-UA mismatch).
+	for _, strict := range []bool{true, false} {
+		strict := strict
+		t.Run("billing_header_missing always rejects strict="+boolStr(strict), func(t *testing.T) {
+			v := NewClaudeCodeValidator()
+			v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: strict})
+			req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+			req.Header.Set("User-Agent", "claude-cli/2.1.100 (external, cli)")
+			body := map[string]any{
+				"system":   []any{},
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			}
+			require.False(t, v.validateBillingHeaderSuffix(req, body))
+		})
+
+		t.Run("cc_version_unparseable always rejects strict="+boolStr(strict), func(t *testing.T) {
+			v := NewClaudeCodeValidator()
+			v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: strict})
+			req, body := newBillingSuffixTestReq(t,
+				"claude-cli/2.1.100 (external, cli)",
+				"x-anthropic-billing-header: cc_version=2.1.100; cc_entrypoint=cli; cch=00000;", // no .SSS
+				"hi",
+			)
+			require.False(t, v.validateBillingHeaderSuffix(req, body))
+		})
+
+		t.Run("version_ua_mismatch always rejects strict="+boolStr(strict), func(t *testing.T) {
+			v := NewClaudeCodeValidator()
+			v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: strict})
+			req, body := newBillingSuffixTestReq(t,
+				"claude-cli/2.1.100 (external, cli)",
+				"x-anthropic-billing-header: cc_version=2.1.110.abc; cc_entrypoint=cli; cch=00000;", // 110 != 100
+				"hi",
+			)
+			require.False(t, v.validateBillingHeaderSuffix(req, body))
+		})
+	}
+}
+
+func TestValidateBillingHeaderSuffix_SuffixBranchControlledByToggle(t *testing.T) {
+	// Build a request with deliberately wrong (but valid-hex) suffix — accept
+	// iff strict off. For "hello world test" + ver=2.1.100 the correct suffix
+	// is 714; we send 000 instead so the branch fires.
+	mkReq := func() (*http.Request, map[string]any) {
+		return newBillingSuffixTestReq(t,
+			"claude-cli/2.1.100 (external, cli)",
+			"x-anthropic-billing-header: cc_version=2.1.100.000; cc_entrypoint=cli; cch=00000;",
+			"hello world test",
+		)
+	}
+
+	t.Run("strict ON: wrong suffix rejects", func(t *testing.T) {
+		v := NewClaudeCodeValidator()
+		v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: true})
+		req, body := mkReq()
+		require.False(t, v.validateBillingHeaderSuffix(req, body))
+	})
+
+	t.Run("strict OFF: wrong suffix passes", func(t *testing.T) {
+		v := NewClaudeCodeValidator()
+		v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: false})
+		req, body := mkReq()
+		require.True(t, v.validateBillingHeaderSuffix(req, body))
+	})
+}
+
+func TestValidateBillingHeaderSuffix_CorrectSuffixAlwaysPasses(t *testing.T) {
+	// Reference 2.1.77 example with correct suffix b88 — should pass under
+	// both strict modes.
+	mkReq := func() (*http.Request, map[string]any) {
+		return newBillingSuffixTestReq(t,
+			"claude-cli/2.1.77 (external, cli)",
+			"x-anthropic-billing-header: cc_version=2.1.77.b88; cc_entrypoint=cli; cch=00000;",
+			"Hello, how are you?", // chars at [4,7,20] = 'o','h','0' -> b88 per spec
+		)
+	}
+
+	for _, strict := range []bool{true, false} {
+		strict := strict
+		t.Run("strict="+boolStr(strict), func(t *testing.T) {
+			v := NewClaudeCodeValidator()
+			v.SetStrictCCVersionSettings(&fixedSettingsProvider{enabled: strict})
+			req, body := mkReq()
+			require.True(t, v.validateBillingHeaderSuffix(req, body))
+		})
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 func TestExtractFirstUserMessageTextFromMap(t *testing.T) {
