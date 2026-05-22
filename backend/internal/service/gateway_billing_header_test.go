@@ -139,10 +139,10 @@ func TestComputeBillingHeaderSuffix(t *testing.T) {
 		assert.Equal(t, "75f", computeBillingHeaderSuffix(body, "2.1.146"))
 	})
 
-	t.Run("/mcp next turn: skips <command-name>, samples trailing user URL", func(t *testing.T) {
+	t.Run("/mcp next turn (non-empty stdout): samples trailing user URL", func(t *testing.T) {
 		// 2026-05-22 18:22 production reject (CLI 2.1.138, post-/mcp turn).
-		// Block list approximated; CLI samples the trailing user input
-		// (URL string), not the <command-name>/mcp wrapper.
+		// stdout has MCP server status content, CLI samples the trailing
+		// user input (URL string), not the <command-name>/mcp wrapper.
 		// Trailing block "https://cert.rctech.ac.t..." at rune[4]/[7]/[20] =
 		// 's', '/', 'a' -> chars="s/a" -> dc7 for ver 2.1.138.
 		body := []byte(`{"messages":[{"role":"user","content":[
@@ -156,10 +156,10 @@ func TestComputeBillingHeaderSuffix(t *testing.T) {
 		assert.Equal(t, "dc7", computeBillingHeaderSuffix(body, "2.1.138"))
 	})
 
-	t.Run("/clear next turn: also skips <command-name>, samples trailing user input", func(t *testing.T) {
-		// 旧 capture 025 / 036 显示 parsed_suffix=793 来自 <command-name>/clear，
-		// 但新生产 (2026-05-22 18:22) 证实 CLI 已统一跳过 <command-name>；这里
-		// 验证我们的新规则——直接取末尾用户文本。
+	t.Run("/clear next turn (empty stdout): samples <command-name>/clear", func(t *testing.T) {
+		// capture/0521/025/036 + 2026-05-22 18:48 production reject all
+		// confirm: /clear has empty stdout, CLI samples <command-name>/clear.
+		// Block [5] rune[4]/[7]/[20] = 'm', 'd', '<' -> chars="md<" -> 793.
 		body := []byte(`{"messages":[{"role":"user","content":[
 			{"type":"text","text":"<system-reminder>\ntools\n</system-reminder>"},
 			{"type":"text","text":"<system-reminder>\nmcp\n</system-reminder>"},
@@ -170,10 +170,7 @@ func TestComputeBillingHeaderSuffix(t *testing.T) {
 			{"type":"text","text":"<local-command-stdout></local-command-stdout>"},
 			{"type":"text","text":"你睡"}
 		]}]}`)
-		// "你睡" 2 runes only -> chars at [4,7,20] all out of range -> "000".
-		// sha256(salt + "000" + "2.1.146")[:3] independently verified below.
-		expected := sha256Prefix3(billingHeaderSuffixSalt + "000" + "2.1.146")
-		assert.Equal(t, expected, computeBillingHeaderSuffix(body, "2.1.146"))
+		assert.Equal(t, "793", computeBillingHeaderSuffix(body, "2.1.146"))
 	})
 
 	t.Run("compact summary single block: samples it directly", func(t *testing.T) {
@@ -319,10 +316,10 @@ func TestPickBillingHeaderSampleText(t *testing.T) {
 		assert.Equal(t, "real input", got)
 	})
 
-	t.Run("skips <local- (caveat/stdout) and <command-name>, takes user input", func(t *testing.T) {
-		// 2026-05-22 production observation (/mcp turn): CLI samples the
-		// user's input that follows the slash command, not the
-		// <command-name> wrapper itself.
+	t.Run("/clear (empty stdout) - samples <command-name>", func(t *testing.T) {
+		// 2026-05-22 18:48 production reject confirmed: /clear's stdout is
+		// empty, CLI samples <command-name>/clear itself. Matches older
+		// capture 0521/025/036 behavior.
 		got := pickBillingHeaderSampleText([]string{
 			"<system-reminder>x</system-reminder>",
 			"<local-command-caveat>...</local-command-caveat>",
@@ -330,20 +327,46 @@ func TestPickBillingHeaderSampleText(t *testing.T) {
 			"<local-command-stdout></local-command-stdout>",
 			"user input",
 		})
-		assert.Equal(t, "user input", got)
+		assert.Equal(t, "<command-name>/clear</command-name>", got)
 	})
 
-	t.Run("skips <command-name> blocks too", func(t *testing.T) {
-		// <command-name> is now in the skip list (alongside <system-reminder>
-		// and <local-*). When followed only by other skipped blocks, the
-		// picker falls back to the last entry — but in real CLI traffic
-		// there is always a trailing user-authored block.
+	t.Run("/mcp (non-empty stdout) - skips <command-name>, samples user input", func(t *testing.T) {
+		// 2026-05-22 18:22 production reject confirmed: /mcp's stdout has
+		// MCP server status content, CLI samples the user's next input.
+		got := pickBillingHeaderSampleText([]string{
+			"<system-reminder>x</system-reminder>",
+			"<command-name>/mcp</command-name>",
+			"<local-command-stdout>MCP server status\nfoo: ok</local-command-stdout>",
+			"https://cert.example.com",
+		})
+		assert.Equal(t, "https://cert.example.com", got)
+	})
+
+	t.Run("<command-name> with no following stdout - samples <command-name>", func(t *testing.T) {
+		// Degenerate / defensive: no stdout block at all → treat slash
+		// command as user intent (same as empty stdout case).
 		got := pickBillingHeaderSampleText([]string{
 			"<command-name>/clear</command-name>",
-			"<local-command-stdout></local-command-stdout>",
+			"user input",
 		})
-		// All skipped → fallback returns the last entry.
-		assert.Equal(t, "<local-command-stdout></local-command-stdout>", got)
+		assert.Equal(t, "<command-name>/clear</command-name>", got)
+	})
+
+	t.Run("/compact (compact summary block before <command-name>) - samples summary", func(t *testing.T) {
+		// /compact's compact-summary block sits BEFORE the command-name
+		// block in the array. The picker hits it first (it's non-skip) and
+		// returns it, regardless of the trailing stdout content.
+		got := pickBillingHeaderSampleText([]string{
+			"<system-reminder>x</system-reminder>",
+			"This session is being continued from a previous conversation",
+			"<local-command-caveat>...</local-command-caveat>",
+			"<command-name>/compact</command-name>",
+			"<local-command-stdout>Compacted</local-command-stdout>",
+			"user new turn",
+		})
+		assert.Equal(t,
+			"This session is being continued from a previous conversation",
+			got)
 	})
 
 	t.Run("falls back to last entry when every block is skipped", func(t *testing.T) {
@@ -352,6 +375,37 @@ func TestPickBillingHeaderSampleText(t *testing.T) {
 			"<local-command-stdout></local-command-stdout>",
 		})
 		assert.Equal(t, "<local-command-stdout></local-command-stdout>", got)
+	})
+}
+
+func TestHasNonEmptyLocalCommandStdoutAhead(t *testing.T) {
+	t.Run("no stdout block", func(t *testing.T) {
+		assert.False(t, hasNonEmptyLocalCommandStdoutAhead([]string{"foo", "bar"}))
+	})
+
+	t.Run("empty stdout block", func(t *testing.T) {
+		assert.False(t, hasNonEmptyLocalCommandStdoutAhead([]string{
+			"<local-command-stdout></local-command-stdout>",
+		}))
+	})
+
+	t.Run("whitespace-only stdout block", func(t *testing.T) {
+		assert.False(t, hasNonEmptyLocalCommandStdoutAhead([]string{
+			"<local-command-stdout>   \n  </local-command-stdout>",
+		}))
+	})
+
+	t.Run("non-empty stdout block", func(t *testing.T) {
+		assert.True(t, hasNonEmptyLocalCommandStdoutAhead([]string{
+			"<local-command-stdout>MCP server status</local-command-stdout>",
+		}))
+	})
+
+	t.Run("non-empty stdout among other blocks", func(t *testing.T) {
+		assert.True(t, hasNonEmptyLocalCommandStdoutAhead([]string{
+			"some user content",
+			"<local-command-stdout>output</local-command-stdout>",
+		}))
 	})
 }
 

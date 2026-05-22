@@ -720,9 +720,7 @@ func TestExtractFirstUserMessageTextFromMap(t *testing.T) {
 		require.Equal(t, "real input", extractFirstUserMessageTextFromMap(body))
 	})
 
-	t.Run("/slash command scenario: skips <command-name>, samples trailing user input", func(t *testing.T) {
-		// 2026-05-22 18:22 /mcp 生产证实 CLI 跳过 <command-name>，采样后面的
-		// 用户文本块。/clear /mcp /help 等所有 slash 命令统一适用。
+	t.Run("/clear (empty stdout): samples <command-name>/clear", func(t *testing.T) {
 		body := map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -741,7 +739,26 @@ func TestExtractFirstUserMessageTextFromMap(t *testing.T) {
 			},
 		}
 		require.Equal(t,
-			"nihao",
+			"<command-name>/clear</command-name>",
+			extractFirstUserMessageTextFromMap(body))
+	})
+
+	t.Run("/mcp (non-empty stdout): skips <command-name>, samples user input", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder>a</system-reminder>"},
+						map[string]any{"type": "text", "text": "<command-name>/mcp</command-name>"},
+						map[string]any{"type": "text", "text": "<local-command-stdout>MCP status output</local-command-stdout>"},
+						map[string]any{"type": "text", "text": "https://example.com"},
+					},
+				},
+			},
+		}
+		require.Equal(t,
+			"https://example.com",
 			extractFirstUserMessageTextFromMap(body))
 	})
 

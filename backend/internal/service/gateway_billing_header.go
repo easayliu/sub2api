@@ -25,36 +25,59 @@ const billingHeaderSuffixSalt = "59cf53e54c78"
 var billingHeaderSuffixPositions = [...]int{4, 7, 20}
 
 // billingHeaderSampleSkipPrefixes lists text-block prefixes the official CLI
-// skips when picking the "first user message text" that feeds the suffix
-// hash. They mark blocks the CLI injects itself (environment scaffolding +
-// local /-command products + slash-command wrappers); the user-authored
-// payload is whichever block comes after them.
+// always skips when picking the "first user message text" that feeds the
+// suffix hash. They mark blocks the CLI injects itself (environment
+// scaffolding + local /-command products); the user-authored payload is
+// whichever block comes after them.
 //
-// Skip rules verified against production reject corpus:
 //   - <system-reminder> — environment / tools / instructions wrappers
 //   - <local-          — local-command-caveat / local-command-stdout
-//   - <command-name>   — slash-command marker; CLI does not key off this
-//     block even when the slash command is the "user-issued" intent. See
-//     2026-05-22 18:22 /mcp reject where CLI sampled the trailing user URL
-//     instead of <command-name>/mcp. Older /clear captures (0521/025/036)
-//     showed CLI sampling <command-name>/clear, but newer production
-//     traffic indicates CLI has converged to skipping <command-name> in
-//     all slash-command turns.
+//
+// Note <command-name> is intentionally NOT in this unconditional skip
+// list; its handling depends on the surrounding stdout block — see
+// pickBillingHeaderSampleText for the conditional rule.
 var billingHeaderSampleSkipPrefixes = []string{
 	"<system-reminder>",
 	"<local-",
-	"<command-name>",
 }
 
+const commandNameOpenTag = "<command-name>"
+
+const (
+	localCommandStdoutOpenTag  = "<local-command-stdout>"
+	localCommandStdoutCloseTag = "</local-command-stdout>"
+)
+
 // pickBillingHeaderSampleText selects, from text-block contents in
-// messages[0].content order, the first block whose text does not start with
-// any prefix in billingHeaderSampleSkipPrefixes. Falls back to the last
-// entry if every block is skipped (defensive; real CLI traffic always
-// leaves at least one payload block).
+// messages[0].content order, the block the official CLI keys its
+// cc_version suffix hash off of.
+//
+// Rule:
+//   - Unconditionally skip <system-reminder> and <local-* (caveat/stdout)
+//   - For <command-name> blocks, look ahead for a matching
+//     <local-command-stdout> in the remaining blocks:
+//     · stdout is NON-empty → this is an informational slash command
+//     (/mcp, /help, /agents, etc.); CLI treats the user's next input
+//     as the "first user text", so skip <command-name>.
+//     · stdout is EMPTY or absent → this is a state-mutating slash
+//     command (/clear); CLI treats the slash command itself as the
+//     user intent, so sample <command-name>.
+//   - Fall back to the last entry if every block is skipped (defensive;
+//     real CLI traffic always leaves at least one payload block).
+//
+// Conditional rule verified against:
+//   - 2026-05-22 18:22 /mcp reject (non-empty stdout): CLI sampled user URL
+//   - 2026-05-22 18:48 /clear reject (empty stdout): CLI sampled <command-name>/clear
+//   - capture/0521/025-036 (/clear with empty stdout): historical baseline
 func pickBillingHeaderSampleText(texts []string) string {
-	for _, t := range texts {
+	for i, t := range texts {
 		if billingHeaderSampleTextShouldSkip(t) {
 			continue
+		}
+		if strings.HasPrefix(t, commandNameOpenTag) {
+			if hasNonEmptyLocalCommandStdoutAhead(texts[i+1:]) {
+				continue
+			}
 		}
 		return t
 	}
@@ -67,6 +90,26 @@ func pickBillingHeaderSampleText(texts []string) string {
 func billingHeaderSampleTextShouldSkip(text string) bool {
 	for _, p := range billingHeaderSampleSkipPrefixes {
 		if strings.HasPrefix(text, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasNonEmptyLocalCommandStdoutAhead reports whether any of the remaining
+// text blocks is a <local-command-stdout>...</local-command-stdout> with
+// non-empty content. Used to distinguish informational slash commands
+// (non-empty stdout, e.g. /mcp showing server status) from state-mutating
+// ones (empty stdout, e.g. /clear printing nothing) when deciding whether
+// to skip the preceding <command-name> block.
+func hasNonEmptyLocalCommandStdoutAhead(remaining []string) bool {
+	for _, t := range remaining {
+		if !strings.HasPrefix(t, localCommandStdoutOpenTag) {
+			continue
+		}
+		inner := strings.TrimPrefix(t, localCommandStdoutOpenTag)
+		inner = strings.TrimSuffix(inner, localCommandStdoutCloseTag)
+		if strings.TrimSpace(inner) != "" {
 			return true
 		}
 	}
