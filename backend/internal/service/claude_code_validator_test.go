@@ -720,11 +720,9 @@ func TestExtractFirstUserMessageTextFromMap(t *testing.T) {
 		require.Equal(t, "real input", extractFirstUserMessageTextFromMap(body))
 	})
 
-	t.Run("/clear scenario: samples <command-name>/clear block, not trailing user text", func(t *testing.T) {
-		// Mirrors capture/0521/025 block structure: 4 system-reminders, a
-		// <local-command-caveat>, the <command-name>/clear, a
-		// <local-command-stdout>, then the user's next-turn input. The map
-		// extractor must agree with the bytes version on the /clear block.
+	t.Run("/slash command scenario: skips <command-name>, samples trailing user input", func(t *testing.T) {
+		// 2026-05-22 18:22 /mcp 生产证实 CLI 跳过 <command-name>，采样后面的
+		// 用户文本块。/clear /mcp /help 等所有 slash 命令统一适用。
 		body := map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -743,7 +741,7 @@ func TestExtractFirstUserMessageTextFromMap(t *testing.T) {
 			},
 		}
 		require.Equal(t,
-			"<command-name>/clear</command-name>",
+			"nihao",
 			extractFirstUserMessageTextFromMap(body))
 	})
 

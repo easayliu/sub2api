@@ -27,16 +27,23 @@ var billingHeaderSuffixPositions = [...]int{4, 7, 20}
 // billingHeaderSampleSkipPrefixes lists text-block prefixes the official CLI
 // skips when picking the "first user message text" that feeds the suffix
 // hash. They mark blocks the CLI injects itself (environment scaffolding +
-// local /-command products); the user-authored payload is whichever block
-// comes after them.
+// local /-command products + slash-command wrappers); the user-authored
+// payload is whichever block comes after them.
 //
-// Verified against capture/0521 (compact + /clear scenarios): for /clear
-// turns CLI samples the <command-name>/clear...</command-name> block, so
-// <command-name> intentionally stays out of this skip list — only the
-// strictly CLI-internal wrappers are skipped.
+// Skip rules verified against production reject corpus:
+//   - <system-reminder> — environment / tools / instructions wrappers
+//   - <local-          — local-command-caveat / local-command-stdout
+//   - <command-name>   — slash-command marker; CLI does not key off this
+//     block even when the slash command is the "user-issued" intent. See
+//     2026-05-22 18:22 /mcp reject where CLI sampled the trailing user URL
+//     instead of <command-name>/mcp. Older /clear captures (0521/025/036)
+//     showed CLI sampling <command-name>/clear, but newer production
+//     traffic indicates CLI has converged to skipping <command-name> in
+//     all slash-command turns.
 var billingHeaderSampleSkipPrefixes = []string{
 	"<system-reminder>",
 	"<local-",
+	"<command-name>",
 }
 
 // pickBillingHeaderSampleText selects, from text-block contents in

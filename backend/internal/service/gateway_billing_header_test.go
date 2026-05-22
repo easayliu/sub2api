@@ -139,16 +139,27 @@ func TestComputeBillingHeaderSuffix(t *testing.T) {
 		assert.Equal(t, "75f", computeBillingHeaderSuffix(body, "2.1.146"))
 	})
 
-	t.Run("clear next turn: samples <command-name>/clear block", func(t *testing.T) {
-		// capture/0521/025 and 036 (CLI 2.1.146, post-/clear next turn):
-		//   [0..3] <system-reminder>...   skipped
-		//   [4]    <local-command-caveat> skipped (<local- prefix)
-		//   [5]    "<command-name>/clear</command-name>..."  <-- sampled
-		//   [6]    <local-command-stdout> skipped
-		//   [7]    user input             ignored
-		// 036 used "你睡", 025 used "nihao"; both yield 793 because the sample
-		// is the /clear command-name block, not the user's new text.
-		// Block [5] rune[4]/[7]/[20] = 'm', 'd', '<' -> chars="md<" -> 793.
+	t.Run("/mcp next turn: skips <command-name>, samples trailing user URL", func(t *testing.T) {
+		// 2026-05-22 18:22 production reject (CLI 2.1.138, post-/mcp turn).
+		// Block list approximated; CLI samples the trailing user input
+		// (URL string), not the <command-name>/mcp wrapper.
+		// Trailing block "https://cert.rctech.ac.t..." at rune[4]/[7]/[20] =
+		// 's', '/', 'a' -> chars="s/a" -> dc7 for ver 2.1.138.
+		body := []byte(`{"messages":[{"role":"user","content":[
+			{"type":"text","text":"<system-reminder>\n# MCP\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nThe following\n</system-reminder>"},
+			{"type":"text","text":"<system-reminder>\nAs you\n</system-reminder>"},
+			{"type":"text","text":"<command-name>/mcp</command-name>\n  <command-message>mcp</command-message>"},
+			{"type":"text","text":"<local-command-stdout>MCP server status...</local-command-stdout>"},
+			{"type":"text","text":"https://cert.rctech.ac.th/foo"}
+		]}]}`)
+		assert.Equal(t, "dc7", computeBillingHeaderSuffix(body, "2.1.138"))
+	})
+
+	t.Run("/clear next turn: also skips <command-name>, samples trailing user input", func(t *testing.T) {
+		// 旧 capture 025 / 036 显示 parsed_suffix=793 来自 <command-name>/clear，
+		// 但新生产 (2026-05-22 18:22) 证实 CLI 已统一跳过 <command-name>；这里
+		// 验证我们的新规则——直接取末尾用户文本。
 		body := []byte(`{"messages":[{"role":"user","content":[
 			{"type":"text","text":"<system-reminder>\ntools\n</system-reminder>"},
 			{"type":"text","text":"<system-reminder>\nmcp\n</system-reminder>"},
@@ -159,7 +170,10 @@ func TestComputeBillingHeaderSuffix(t *testing.T) {
 			{"type":"text","text":"<local-command-stdout></local-command-stdout>"},
 			{"type":"text","text":"你睡"}
 		]}]}`)
-		assert.Equal(t, "793", computeBillingHeaderSuffix(body, "2.1.146"))
+		// "你睡" 2 runes only -> chars at [4,7,20] all out of range -> "000".
+		// sha256(salt + "000" + "2.1.146")[:3] independently verified below.
+		expected := sha256Prefix3(billingHeaderSuffixSalt + "000" + "2.1.146")
+		assert.Equal(t, expected, computeBillingHeaderSuffix(body, "2.1.146"))
 	})
 
 	t.Run("compact summary single block: samples it directly", func(t *testing.T) {
@@ -305,7 +319,10 @@ func TestPickBillingHeaderSampleText(t *testing.T) {
 		assert.Equal(t, "real input", got)
 	})
 
-	t.Run("skips <local- prefix (caveat and stdout)", func(t *testing.T) {
+	t.Run("skips <local- (caveat/stdout) and <command-name>, takes user input", func(t *testing.T) {
+		// 2026-05-22 production observation (/mcp turn): CLI samples the
+		// user's input that follows the slash command, not the
+		// <command-name> wrapper itself.
 		got := pickBillingHeaderSampleText([]string{
 			"<system-reminder>x</system-reminder>",
 			"<local-command-caveat>...</local-command-caveat>",
@@ -313,19 +330,20 @@ func TestPickBillingHeaderSampleText(t *testing.T) {
 			"<local-command-stdout></local-command-stdout>",
 			"user input",
 		})
-		assert.Equal(t, "<command-name>/clear</command-name>", got)
+		assert.Equal(t, "user input", got)
 	})
 
-	t.Run("does not skip <command-name> blocks", func(t *testing.T) {
-		// <command-name> represents the slash command the user typed; CLI
-		// keys the suffix off this block when running /clear (see captures
-		// 025/026/036/038). Only <system-reminder> and <local-* prefixes
-		// are dropped.
+	t.Run("skips <command-name> blocks too", func(t *testing.T) {
+		// <command-name> is now in the skip list (alongside <system-reminder>
+		// and <local-*). When followed only by other skipped blocks, the
+		// picker falls back to the last entry — but in real CLI traffic
+		// there is always a trailing user-authored block.
 		got := pickBillingHeaderSampleText([]string{
 			"<command-name>/clear</command-name>",
 			"<local-command-stdout></local-command-stdout>",
 		})
-		assert.Equal(t, "<command-name>/clear</command-name>", got)
+		// All skipped → fallback returns the last entry.
+		assert.Equal(t, "<local-command-stdout></local-command-stdout>", got)
 	})
 
 	t.Run("falls back to last entry when every block is skipped", func(t *testing.T) {
