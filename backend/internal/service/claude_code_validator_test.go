@@ -260,7 +260,7 @@ func TestBuildRejectShape(t *testing.T) {
 func TestClaudeCodeValidator_ProbeBypass(t *testing.T) {
 	validator := NewClaudeCodeValidator()
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
-	req.Header.Set("User-Agent", "claude-cli/1.2.3 (darwin; arm64)")
+	req.Header.Set("User-Agent", "claude-cli/1.2.3 (external, cli)")
 	req = req.WithContext(context.WithValue(req.Context(), ctxkey.IsMaxTokensOneHaikuRequest, true))
 
 	ok := validator.Validate(req, map[string]any{
@@ -358,7 +358,7 @@ func TestClaudeCodeValidator_HaikuWithoutOutputConfigStillStrict(t *testing.T) {
 func TestClaudeCodeValidator_MessagesWithoutProbeStillNeedStrictValidation(t *testing.T) {
 	validator := NewClaudeCodeValidator()
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
-	req.Header.Set("User-Agent", "claude-cli/1.2.3 (darwin; arm64)")
+	req.Header.Set("User-Agent", "claude-cli/1.2.3 (external, cli)")
 
 	ok := validator.Validate(req, map[string]any{
 		"model":      "claude-haiku-4-5",
@@ -370,7 +370,7 @@ func TestClaudeCodeValidator_MessagesWithoutProbeStillNeedStrictValidation(t *te
 func TestClaudeCodeValidator_NonMessagesPathUAOnly(t *testing.T) {
 	validator := NewClaudeCodeValidator()
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/models", nil)
-	req.Header.Set("User-Agent", "claude-cli/1.2.3 (darwin; arm64)")
+	req.Header.Set("User-Agent", "claude-cli/1.2.3 (external, cli)")
 
 	ok := validator.Validate(req, nil)
 	require.True(t, ok)
@@ -382,7 +382,7 @@ func TestClaudeCodeValidator_NonMessagesPathUAOnly(t *testing.T) {
 func TestClaudeCodeValidator_CountTokensBypassWithUA(t *testing.T) {
 	validator := NewClaudeCodeValidator()
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages/count_tokens", nil)
-	req.Header.Set("User-Agent", "claude-cli/1.2.3 (darwin; arm64)")
+	req.Header.Set("User-Agent", "claude-cli/1.2.3 (external, cli)")
 
 	ok := validator.Validate(req, map[string]any{
 		"model": "claude-opus-4-7",
@@ -484,6 +484,78 @@ func TestClaudeCodeValidator_SetStrictCCVersionSettings_TypedNilPointer(t *testi
 		require.True(t, v.strictCCVersionEnabled(context.Background()),
 			"typed-nil provider 必须被守卫识别为未注入并返回默认 strict")
 	})
+}
+
+func TestIsAllowedClaudeCLIUAFamily(t *testing.T) {
+	allowed := []string{
+		"claude-cli/2.1.146 (external, cli)",
+		"claude-cli/2.1.109 (external, sdk-cli)",
+		"claude-cli/2.1.100 (external,cli)",                               // missing space — tolerated
+		"Claude-CLI/2.1.92 (External, CLI)",                               // case insensitive
+		"claude-cli/2.1.146 (external, cli) ",                             // trailing whitespace allowed
+		"claude-cli/2.1.146 (external, sdk-cli)\n",                        // trailing newline ok
+		"claude-cli/2.1.145 (external, claude-vscode)",                    // VSCode 截断形态
+		"claude-cli/2.1.145 (external, claude-vscode, agent-sdk/0.3.145)", // VSCode + agent-sdk
+		"claude-cli/2.1.144 (external, claude-vscode, agent-sdk/0.3.144)",
+		"Claude-CLI/2.1.144 (External, Claude-VSCode, Agent-SDK/0.3.144)", // case insensitive
+	}
+	for _, ua := range allowed {
+		require.True(t, isAllowedClaudeCLIUAFamily(ua), "should allow: %q", ua)
+	}
+
+	denied := []string{
+		"",
+		"claude-cli/2.1.146", // no parenthesized suffix
+		"claude-cli/2.1.128 (external, local-agent)",                          // illegitimate
+		"claude-cli/2.1.142 (external, claude-desktop-3p, agent-sdk/0.3.142)", // Desktop 3p
+		"claude-cli/2.1.146 (darwin; arm64)",                                  // pre-2.1.77 style
+		"claude-cli/2.1.146 (external, cli, extra-token)",                     // extra tokens not allowed
+		"claude-cli/2.1.146 (external, sdkcli)",                               // typo / forged
+		"claude-cli/2.1.146 (external, claude-vscode-fake)",                   // forged claude-vscode-like prefix
+		"claude-cli/2.1.146 (external, claude-vscode, junk-suffix)",           // claude-vscode followed by non-agent-sdk token
+		"curl/8.0.0",
+	}
+	for _, ua := range denied {
+		require.False(t, isAllowedClaudeCLIUAFamily(ua), "should deny: %q", ua)
+	}
+}
+
+func TestClaudeCodeValidator_ValidateUserAgent_EnforcesFamily(t *testing.T) {
+	v := NewClaudeCodeValidator()
+	// Modern allow-listed families pass.
+	require.True(t, v.ValidateUserAgent("claude-cli/2.1.146 (external, cli)"))
+	require.True(t, v.ValidateUserAgent("claude-cli/2.1.109 (external, sdk-cli)"))
+	require.True(t, v.ValidateUserAgent("claude-cli/2.1.145 (external, claude-vscode)"))
+	require.True(t, v.ValidateUserAgent("claude-cli/2.1.145 (external, claude-vscode, agent-sdk/0.3.145)"))
+	// Prefix-only is no longer enough — family must also match.
+	require.False(t, v.ValidateUserAgent("claude-cli/2.1.146"))
+	require.False(t, v.ValidateUserAgent("claude-cli/2.1.128 (external, local-agent)"))
+	require.False(t, v.ValidateUserAgent("claude-cli/2.1.142 (external, claude-desktop-3p, agent-sdk/0.3.142)"))
+}
+
+func TestClaudeCodeValidator_Validate_RejectsNonAllowedFamily(t *testing.T) {
+	v := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+	req.Header.Set("User-Agent", "claude-cli/2.1.128 (external, local-agent)")
+	// Even on a non-messages path, family-not-allowed should fail.
+	require.False(t, v.Validate(req, map[string]any{}))
+}
+
+func TestClaudeCodeValidator_Validate_NonMessagesPathStillNeedsAllowedFamily(t *testing.T) {
+	v := NewClaudeCodeValidator()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/models", nil)
+	// Allow-listed families pass on non-messages paths.
+	for _, ua := range []string{
+		"claude-cli/2.1.146 (external, cli)",
+		"claude-cli/2.1.145 (external, claude-vscode, agent-sdk/0.3.145)",
+	} {
+		req.Header.Set("User-Agent", ua)
+		require.True(t, v.Validate(req, nil), "ua=%q", ua)
+	}
+
+	// Illegitimate family fails at Step 1.5 even on non-messages path.
+	req.Header.Set("User-Agent", "claude-cli/2.1.128 (external, local-agent)")
+	require.False(t, v.Validate(req, nil))
 }
 
 func TestClaudeCodeValidator_SetStrictCCVersionSettings_RealProviderRespectsValue(t *testing.T) {

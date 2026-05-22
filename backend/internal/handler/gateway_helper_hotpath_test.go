@@ -151,7 +151,7 @@ func TestSetClaudeCodeClientContext_FastPathAndStrictPath(t *testing.T) {
 
 	t.Run("cli_non_messages_path_sets_true", func(t *testing.T) {
 		c, _ := newHelperTestContext(http.MethodGet, "/v1/models")
-		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1")
+		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1 (external, cli)")
 
 		SetClaudeCodeClientContext(c, nil, nil)
 		require.True(t, service.IsClaudeCodeClient(c.Request.Context()))
@@ -159,7 +159,7 @@ func TestSetClaudeCodeClientContext_FastPathAndStrictPath(t *testing.T) {
 
 	t.Run("cli_messages_path_valid_body_sets_true", func(t *testing.T) {
 		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1")
+		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1 (external, cli)")
 		c.Request.Header.Set("X-App", "cli")
 		c.Request.Header.Set("anthropic-beta", "claude-code-20250219")
 		c.Request.Header.Set("anthropic-version", "2023-06-01")
@@ -174,7 +174,7 @@ func TestSetClaudeCodeClientContext_FastPathAndStrictPath(t *testing.T) {
 
 	t.Run("cli_messages_path_invalid_body_sets_false", func(t *testing.T) {
 		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1")
+		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1 (external, cli)")
 		// 缺少严格校验所需 header + body 字段
 		SetClaudeCodeClientContext(c, []byte(`{"model":"x"}`), nil)
 		require.False(t, service.IsClaudeCodeClient(c.Request.Context()))
@@ -184,7 +184,7 @@ func TestSetClaudeCodeClientContext_FastPathAndStrictPath(t *testing.T) {
 func TestSetClaudeCodeClientContext_ReuseParsedRequestAndContextCache(t *testing.T) {
 	t.Run("reuse parsed request without body unmarshal", func(t *testing.T) {
 		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1")
+		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1 (external, cli)")
 		c.Request.Header.Set("X-App", "cli")
 		c.Request.Header.Set("anthropic-beta", "claude-code-20250219")
 		c.Request.Header.Set("anthropic-version", "2023-06-01")
@@ -208,7 +208,7 @@ func TestSetClaudeCodeClientContext_ReuseParsedRequestAndContextCache(t *testing
 
 	t.Run("reuse context cache without body unmarshal", func(t *testing.T) {
 		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1")
+		c.Request.Header.Set("User-Agent", "claude-cli/1.0.1 (external, cli)")
 		c.Request.Header.Set("X-App", "cli")
 		c.Request.Header.Set("anthropic-beta", "claude-code-20250219")
 		c.Request.Header.Set("anthropic-version", "2023-06-01")

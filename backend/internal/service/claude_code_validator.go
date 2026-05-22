@@ -76,6 +76,24 @@ var (
 	// 带捕获组的版本提取正则
 	claudeCodeUAVersionPattern = regexp.MustCompile(`(?i)^claude-cli/(\d+\.\d+\.\d+)`)
 
+	// allowedClaudeCLIUAFamilyPattern 是 UA 后缀家族白名单。允许的家族：
+	//   - (external, cli)                                 — 终端 CLI（抓包验证）
+	//   - (external, sdk-cli)                             — SDK（抓包验证）
+	//   - (external, claude-vscode)                       — VSCode 扩展（截断形态）
+	//   - (external, claude-vscode, agent-sdk/X.Y.Z)      — VSCode 扩展完整形态
+	//
+	// 拒绝的家族（已观察到但定性为伪造）：
+	//   - (external, local-agent)
+	//   - (external, claude-desktop-3p, ...)
+	//   - 其他未在白名单的 external 衍生
+	//
+	// 注意 claude-vscode 后面的 agent-sdk/X.Y.Z 部分匹配 [^)]+，对子版本号宽松；
+	// 但只允许 claude-vscode 之后跟随 agent-sdk/，避免给"claude-vscode-fake"
+	// 这种伪造类似 UA 后缀绕过。
+	allowedClaudeCLIUAFamilyPattern = regexp.MustCompile(
+		`(?i)\(external,\s*(cli|sdk-cli|claude-vscode(?:,\s*agent-sdk/[^)]+)?)\)\s*$`,
+	)
+
 	// System prompt 相似度阈值（默认 0.5，和 claude-relay-service 一致）
 	systemPromptThreshold = 0.5
 
@@ -261,6 +279,15 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	// Step 1: User-Agent 检查
 	ua := r.Header.Get("User-Agent")
 	if !claudeCodeUAPattern.MatchString(ua) {
+		return false
+	}
+
+	// Step 1.5: UA 后缀家族白名单。
+	// 即便 UA 前缀是 claude-cli/X.Y.Z，括号里的家族后缀也必须是已抓包验证的
+	// (external, cli) 或 (external, sdk-cli)。其他家族（local-agent /
+	// claude-vscode / agent-sdk/... 等）一律拒。
+	if !isAllowedClaudeCLIUAFamily(ua) {
+		logRejected(r, "1.5_ua_family", "not_allowed_family", "ua", ua)
 		return false
 	}
 
@@ -1070,9 +1097,18 @@ func getBigrams(s string) map[string]int {
 	return bigrams
 }
 
-// ValidateUserAgent 仅验证 User-Agent（用于不需要解析请求体的场景）
+// ValidateUserAgent 仅验证 User-Agent（用于不需要解析请求体的场景）。
+// 同时检查前缀 (claude-cli/X.Y.Z) 和后缀家族白名单
+// (allowedClaudeCLIUAFamilyPattern)，未抓包验证的家族一律按非真实 CLI 处理。
 func (v *ClaudeCodeValidator) ValidateUserAgent(ua string) bool {
-	return claudeCodeUAPattern.MatchString(ua)
+	return claudeCodeUAPattern.MatchString(ua) && isAllowedClaudeCLIUAFamily(ua)
+}
+
+// isAllowedClaudeCLIUAFamily 检查 UA 的括号家族后缀是否在白名单内。
+// 真实合法家族（有抓包证据的）：(external, cli) / (external, sdk-cli)。
+// 其它（local-agent / claude-vscode / agent-sdk/X.Y.Z 等）一律拒。
+func isAllowedClaudeCLIUAFamily(ua string) bool {
+	return allowedClaudeCLIUAFamilyPattern.MatchString(ua)
 }
 
 // IncludesClaudeCodeSystemPrompt 检查请求体是否包含 Claude Code 系统提示词
