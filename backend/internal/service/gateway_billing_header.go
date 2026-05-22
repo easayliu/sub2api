@@ -66,37 +66,57 @@ func billingHeaderSampleTextShouldSkip(text string) bool {
 	return false
 }
 
-// inlinedSystemReminderCloseTag marks the end of a <system-reminder>...</...>
-// wrapper that some middlewares inline into a single string when they flatten
-// an array-form first user message. Used by stripInlinedSystemReminders to
-// recover the trailing user-authored payload for suffix derivation.
-const inlinedSystemReminderCloseTag = "</system-reminder>"
+// inlinedSystemReminderOpenTag / inlinedSystemReminderCloseTag bracket a
+// <system-reminder>...</...> wrapper that some middlewares inline into a
+// single string when they flatten an array-form first user message. Used by
+// stripInlinedSystemReminders to recover the user-authored payload for
+// suffix derivation.
+const (
+	inlinedSystemReminderOpenTag  = "<system-reminder>"
+	inlinedSystemReminderCloseTag = "</system-reminder>"
+)
 
 // stripInlinedSystemReminders unwraps string-form messages[0].content whose
 // payload is an array-form turn that some middleware has concatenated into a
-// single string. The flattened layout always ends with the user-authored or
-// compact-summary text after the last </system-reminder> closing tag, so we
-// strip everything up to and including that tag and trim leading whitespace.
+// single string. Two flattening shapes are handled:
 //
-// Returns the original text unchanged when:
-//   - the text does not contain </system-reminder> (plain string content)
-//   - everything after the last </system-reminder> is whitespace-only (the
-//     flattening produced no recoverable user portion; fall back so the
-//     suffix derivation at least has stable input)
+//  1. SR wrappers followed by user text:
+//     "<sr>...</sr><sr>...</sr>...real user text"
+//     → take text after the last </system-reminder>.
+//  2. SR wrappers with the close tag at the very end of the string (either a
+//     single SR wraps the whole payload, or multiple SR blocks are joined
+//     and the last block contains the user-authored content):
+//     "<sr>...</sr><sr>real user text</sr>"
+//     → fall back to the inner content of the last <sr>...</sr> pair.
+//
+// Returns the original text unchanged when neither shape applies (no close
+// tag at all, or the recovered inner is empty), so the suffix derivation at
+// least has stable input.
 //
 // Verified against the production reject corpus (ver 2.1.138 / 2.1.143 /
-// 2.1.144) where parsed_suffix algebraically matches the suffix derived from
-// the trailing compact-summary segment of an equivalent array-form body.
+// 2.1.144 / 2.1.145) where parsed_suffix algebraically matches the suffix
+// derived from the recovered trailing or last-SR-inner segment of an
+// equivalent array-form body.
 func stripInlinedSystemReminders(text string) string {
-	idx := strings.LastIndex(text, inlinedSystemReminderCloseTag)
-	if idx < 0 {
+	closeIdx := strings.LastIndex(text, inlinedSystemReminderCloseTag)
+	if closeIdx < 0 {
 		return text
 	}
-	trailing := strings.TrimLeft(text[idx+len(inlinedSystemReminderCloseTag):], " \t\r\n")
-	if trailing == "" {
+	trailing := strings.TrimLeft(text[closeIdx+len(inlinedSystemReminderCloseTag):], " \t\r\n")
+	if trailing != "" {
+		return trailing
+	}
+	// Close tag at the very end with no trailing user text — peel back into
+	// the matching last <system-reminder> open tag and return its inner.
+	openIdx := strings.LastIndex(text[:closeIdx], inlinedSystemReminderOpenTag)
+	if openIdx < 0 {
 		return text
 	}
-	return trailing
+	inner := strings.TrimLeft(text[openIdx+len(inlinedSystemReminderOpenTag):closeIdx], " \t\r\n")
+	if inner == "" {
+		return text
+	}
+	return inner
 }
 
 // ccEntrypointRe matches cc_entrypoint=<value> inside an x-anthropic-billing-header

@@ -198,8 +198,37 @@ func TestStripInlinedSystemReminders(t *testing.T) {
 			stripInlinedSystemReminders(in))
 	})
 
-	t.Run("trailing only whitespace after last close tag - fall back to original", func(t *testing.T) {
+	t.Run("trailing only whitespace after last close tag - fall back to inner of last SR pair", func(t *testing.T) {
+		// 现行规则：trailing 为空时回退到最后一个 <sr>...</sr> 的 inner
 		in := "<system-reminder>foo</system-reminder>\n   \n"
+		assert.Equal(t, "foo", stripInlinedSystemReminders(in))
+	})
+
+	t.Run("close tag at very end - returns inner of last SR pair", func(t *testing.T) {
+		// 单 SR 全裹整段：返回 inner
+		in := "<system-reminder>real user content</system-reminder>"
+		assert.Equal(t, "real user content", stripInlinedSystemReminders(in))
+	})
+
+	t.Run("multiple SR concatenated with close at end - returns last SR inner", func(t *testing.T) {
+		// 多 SR 拼接，最后一个 </sr> 在末尾：取最后一对 SR 内部
+		in := "<system-reminder>tools</system-reminder>\n" +
+			"<system-reminder>mcp</system-reminder>\n" +
+			"<system-reminder>This session is being continued from a previous conversation</system-reminder>"
+		assert.Equal(t,
+			"This session is being continued from a previous conversation",
+			stripInlinedSystemReminders(in))
+	})
+
+	t.Run("close tag at end but inner is empty - fall back to original", func(t *testing.T) {
+		// 退化情况：<sr></sr> 内部为空，fallback 到原文
+		in := "<system-reminder></system-reminder>"
+		assert.Equal(t, in, stripInlinedSystemReminders(in))
+	})
+
+	t.Run("close at end but no matching open tag - fall back to original", func(t *testing.T) {
+		// 仅有 close 标签，没有 open（理论上不该发生）
+		in := "some content</system-reminder>"
 		assert.Equal(t, in, stripInlinedSystemReminders(in))
 	})
 
@@ -210,7 +239,7 @@ func TestStripInlinedSystemReminders(t *testing.T) {
 		assert.Equal(t, "then more", stripInlinedSystemReminders(in))
 	})
 
-	t.Run("matches historical forge corpus suffixes", func(t *testing.T) {
+	t.Run("matches historical forge corpus suffixes - trailing after last close tag", func(t *testing.T) {
 		// Validates the analytical finding that the production forge corpus
 		// (string-form messages[0].content starting with <system-reminder>) is
 		// actually a flattened array-form turn whose trailing block is the
@@ -241,6 +270,20 @@ func TestStripInlinedSystemReminders(t *testing.T) {
 			got := computeBillingHeaderSuffix(body, c.ver)
 			assert.Equal(t, c.wantSuffix, got, c.reason)
 		}
+	})
+
+	t.Run("matches historical forge corpus - close tag at very end (last SR inner)", func(t *testing.T) {
+		// 15:49 production reject (ver 2.1.145, parsed 20b): the entire string
+		// ends with </system-reminder>, indicating multiple SR blocks where the
+		// last <sr>...</sr> contains the compact-summary text. Verify the new
+		// "fall back to last SR inner" path produces 20b for ver=2.1.145 when
+		// the last SR inner starts with "This session is being co...".
+		inner := "This session is being continued from a previous conversation"
+		flattened := "<system-reminder>tools</system-reminder>\n" +
+			"<system-reminder>mcp</system-reminder>\n" +
+			"<system-reminder>" + inner + "</system-reminder>"
+		body := []byte(`{"messages":[{"role":"user","content":"` + flattened + `"}]}`)
+		assert.Equal(t, "20b", computeBillingHeaderSuffix(body, "2.1.145"))
 	})
 }
 
