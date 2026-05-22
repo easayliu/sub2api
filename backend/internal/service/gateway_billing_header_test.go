@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/cespare/xxhash/v2"
@@ -295,6 +296,101 @@ func TestStripInlinedSystemReminders(t *testing.T) {
 			"<system-reminder>" + inner + "</system-reminder>"
 		body := []byte(`{"messages":[{"role":"user","content":"` + flattened + `"}]}`)
 		assert.Equal(t, "20b", computeBillingHeaderSuffix(body, "2.1.145"))
+	})
+}
+
+func TestExtractInlinedSystemReminderInners(t *testing.T) {
+	t.Run("no SR pairs returns nil", func(t *testing.T) {
+		assert.Nil(t, extractInlinedSystemReminderInners("plain text"))
+	})
+
+	t.Run("single SR pair", func(t *testing.T) {
+		in := "<system-reminder>" + strings.Repeat("a", 25) + "</system-reminder>"
+		got := extractInlinedSystemReminderInners(in)
+		require.Len(t, got, 1)
+		assert.Equal(t, strings.Repeat("a", 25), got[0])
+	})
+
+	t.Run("short inner is dropped", func(t *testing.T) {
+		// 20 runes < 21 minimum → filtered out
+		in := "<system-reminder>short content here ok</system-reminder>" // 21 char hits the threshold actually let's use shorter
+		// 实际打包：让 inner 严格短于 21
+		in = "<system-reminder>tiny inner</system-reminder>"
+		got := extractInlinedSystemReminderInners(in)
+		assert.Empty(t, got)
+	})
+
+	t.Run("multiple SR pairs kept, leading whitespace trimmed", func(t *testing.T) {
+		in := "<system-reminder>\n" + strings.Repeat("a", 30) + "</system-reminder>" +
+			"<system-reminder>  \n" + strings.Repeat("b", 30) + "</system-reminder>"
+		got := extractInlinedSystemReminderInners(in)
+		require.Len(t, got, 2)
+		assert.Equal(t, strings.Repeat("a", 30), got[0])
+		assert.Equal(t, strings.Repeat("b", 30), got[1])
+	})
+}
+
+func TestReverseMatchInlinedSRInner(t *testing.T) {
+	t.Run("matches when one SR inner hashes to target", func(t *testing.T) {
+		ver := "2.1.144"
+		// "This session is being continued from a previous conversation" 起首
+		// for ver 2.1.144 → chars " sg" → suffix 585. Wrap it in an SR inside
+		// a larger flattened content with other SR wrappers.
+		flat := "<system-reminder>\n" + strings.Repeat("X", 30) + "</system-reminder>" +
+			"<system-reminder>\nThis session is being continued from a previous conversation</system-reminder>" +
+			"<system-reminder>\nResult: " + strings.Repeat("Y", 30) + "</system-reminder>"
+		assert.True(t, reverseMatchInlinedSRInner(flat, ver, "585"))
+	})
+
+	t.Run("no match returns false", func(t *testing.T) {
+		ver := "2.1.144"
+		flat := "<system-reminder>\n" + strings.Repeat("X", 30) + "</system-reminder>" +
+			"<system-reminder>\n" + strings.Repeat("Y", 30) + "</system-reminder>"
+		assert.False(t, reverseMatchInlinedSRInner(flat, ver, "585"))
+	})
+
+	t.Run("short SR inner ignored (no trivial '000' collision)", func(t *testing.T) {
+		ver := "2.1.148"
+		// Empty inner would yield chars "000" → 0b7 for ver 2.1.148; the
+		// minimum-length guard must keep this from matching.
+		flat := "<system-reminder></system-reminder><system-reminder>" + strings.Repeat("a", 30) + "</system-reminder>"
+		assert.False(t, reverseMatchInlinedSRInner(flat, ver, "0b7"),
+			"empty SR inner must not be a viable reverse-match candidate")
+	})
+}
+
+func TestStringContentOfFirstUserMessage(t *testing.T) {
+	t.Run("string content", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		}
+		s, ok := stringContentOfFirstUserMessage(body)
+		require.True(t, ok)
+		assert.Equal(t, "hello", s)
+	})
+
+	t.Run("array content - not string-form", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "hi"},
+				}},
+			},
+		}
+		_, ok := stringContentOfFirstUserMessage(body)
+		assert.False(t, ok)
+	})
+
+	t.Run("nil body", func(t *testing.T) {
+		_, ok := stringContentOfFirstUserMessage(nil)
+		assert.False(t, ok)
+	})
+
+	t.Run("no messages", func(t *testing.T) {
+		_, ok := stringContentOfFirstUserMessage(map[string]any{})
+		assert.False(t, ok)
 	})
 }
 

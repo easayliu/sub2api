@@ -126,6 +126,91 @@ const (
 	inlinedSystemReminderCloseTag = "</system-reminder>"
 )
 
+// inlinedSystemReminderPairRe matches a single <system-reminder>...</system-reminder>
+// pair (non-greedy) in flattened string-form content. Used by
+// extractInlinedSystemReminderInners for the reverse-suffix-match fallback.
+var inlinedSystemReminderPairRe = regexp.MustCompile(
+	`(?s)<system-reminder>(.*?)</system-reminder>`,
+)
+
+// minReverseSuffixInnerRunes is the minimum rune length an SR inner must
+// have to be a candidate in the reverse-suffix-match fallback. Anything
+// shorter than 21 runes has positions [4]/[7]/[20] partly out of range and
+// would default '0' chars — too easy to trivially match by chance.
+const minReverseSuffixInnerRunes = 21
+
+// extractInlinedSystemReminderInners returns the inner contents of every
+// <system-reminder>...</system-reminder> pair embedded inside a flattened
+// string-form messages[0].content. Leading whitespace is trimmed from each
+// inner so SHA256 sampling lines up with the unflattened array-form block.
+// Returns only inners of length >= minReverseSuffixInnerRunes; shorter
+// inners are dropped to avoid weak '0'-padding collisions in the
+// reverse-suffix-match fallback.
+func extractInlinedSystemReminderInners(text string) []string {
+	matches := inlinedSystemReminderPairRe.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		inner := strings.TrimLeft(m[1], " \t\r\n")
+		if utf8RuneCount(inner) < minReverseSuffixInnerRunes {
+			continue
+		}
+		out = append(out, inner)
+	}
+	return out
+}
+
+// utf8RuneCount returns the rune count of s. Wrapped so callers in this
+// package don't all need to import unicode/utf8 just for one symbol.
+func utf8RuneCount(s string) int {
+	n := 0
+	for range s {
+		n++
+	}
+	return n
+}
+
+// reverseMatchInlinedSRInner reports whether any <system-reminder> inner in
+// the flattened string-form content algebraically hashes to parsedSuffix
+// under the v2.1.77+ derivation. Used as a fallback when our primary picker
+// disagrees with parsedSuffix — covers middleware/forge multi-SR layouts
+// where the compact-summary block sits in a non-last position. The strict
+// minimum-inner-length guard (see minReverseSuffixInnerRunes) prevents
+// trivial collisions on whitespace-only / very short segments.
+func reverseMatchInlinedSRInner(text, version, parsedSuffix string) bool {
+	for _, inner := range extractInlinedSystemReminderInners(text) {
+		if computeBillingHeaderSuffixFromText(inner, version) == parsedSuffix {
+			return true
+		}
+	}
+	return false
+}
+
+// stringContentOfFirstUserMessage returns messages[0].content if and only
+// if it is a string (the flattened form). Returns ("", false) for array-
+// form or any other shape — the reverse-suffix-match fallback only applies
+// to string-form bodies.
+func stringContentOfFirstUserMessage(body map[string]any) (string, bool) {
+	if body == nil {
+		return "", false
+	}
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return "", false
+	}
+	m0, ok := msgs[0].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	s, ok := m0["content"].(string)
+	return s, ok
+}
+
 // stripInlinedSystemReminders unwraps string-form messages[0].content whose
 // payload is an array-form turn that some middleware has concatenated into a
 // single string. Two flattening shapes are handled:

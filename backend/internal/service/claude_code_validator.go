@@ -887,6 +887,28 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 		return true
 	}
 
+	// Fallback for flattened string-form bodies: some middlewares concatenate
+	// the array-form turn into a single string with multiple
+	// <system-reminder>...</system-reminder> wrappers, and the SR containing
+	// the compact-summary block (the one the originating CLI keyed its
+	// suffix off) isn't the one our picker chose. Scan every embedded SR
+	// inner and accept if any of them algebraically reproduces parsedSuffix
+	// — this leans on the SHA256 derivation as an integrity proof: a forge
+	// without access to the original body cannot fabricate a matching inner
+	// without already knowing the algorithm. See `extractInlinedSystemReminderInners`
+	// for the candidate filter (minimum length guard).
+	if stringContent, ok := stringContentOfFirstUserMessage(body); ok &&
+		reverseMatchInlinedSRInner(stringContent, uaVersion, parsedSuffix) {
+		slog.Info("claude_code_validator_reverse_matched_inner_sr",
+			"step", "4.4_cc_version",
+			"ua", r.Header.Get("User-Agent"),
+			"ua_version", uaVersion,
+			"parsed_suffix", parsedSuffix,
+			"primary_expected_suffix", expected,
+			"first_user_text_runes", utf8.RuneCountInString(firstUserText))
+		return true
+	}
+
 	// suffix mismatch — 是否拒绝取决于 strictCCVersionEnabled。
 	if !v.strictCCVersionEnabled(r.Context()) {
 		slog.Info("claude_code_validator_suffix_mismatch_relaxed",
