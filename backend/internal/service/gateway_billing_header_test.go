@@ -174,6 +174,76 @@ func TestComputeBillingHeaderSuffix(t *testing.T) {
 	})
 }
 
+func TestStripInlinedSystemReminders(t *testing.T) {
+	t.Run("no system-reminder close tag - returned unchanged", func(t *testing.T) {
+		assert.Equal(t, "hello world", stripInlinedSystemReminders("hello world"))
+	})
+
+	t.Run("empty string - returned unchanged", func(t *testing.T) {
+		assert.Equal(t, "", stripInlinedSystemReminders(""))
+	})
+
+	t.Run("single SR wrapper + trailing text - returns trailing", func(t *testing.T) {
+		in := "<system-reminder>foo</system-reminder>\nuser typed text"
+		assert.Equal(t, "user typed text", stripInlinedSystemReminders(in))
+	})
+
+	t.Run("multiple SR wrappers + trailing compact summary", func(t *testing.T) {
+		in := "<system-reminder>tools</system-reminder>\n" +
+			"<system-reminder>mcp</system-reminder>\n" +
+			"<system-reminder>skills</system-reminder>\n" +
+			"This session is being continued from a previous conversation"
+		assert.Equal(t,
+			"This session is being continued from a previous conversation",
+			stripInlinedSystemReminders(in))
+	})
+
+	t.Run("trailing only whitespace after last close tag - fall back to original", func(t *testing.T) {
+		in := "<system-reminder>foo</system-reminder>\n   \n"
+		assert.Equal(t, in, stripInlinedSystemReminders(in))
+	})
+
+	t.Run("close tag in user text but no wrapper - treated as boundary anyway", func(t *testing.T) {
+		// Edge case: if a user literally types "</system-reminder>" the rule
+		// will sample whatever follows. Acceptable since this is exotic input.
+		in := "user says </system-reminder> then more"
+		assert.Equal(t, "then more", stripInlinedSystemReminders(in))
+	})
+
+	t.Run("matches historical forge corpus suffixes", func(t *testing.T) {
+		// Validates the analytical finding that the production forge corpus
+		// (string-form messages[0].content starting with <system-reminder>) is
+		// actually a flattened array-form turn whose trailing block is the
+		// compact-summary "This session is being co...". The parsed_suffix
+		// recorded in the reject logs algebraically matches the suffix derived
+		// from that trailing segment for the corresponding CLI version.
+		flatten := func(trailing string) string {
+			return "<system-reminder>tools</system-reminder>\n" +
+				"<system-reminder>mcp</system-reminder>\n" +
+				"<system-reminder>skills</system-reminder>\n" +
+				trailing
+		}
+		// Trailing must begin with "This session is being co" so positions
+		// [4]/[7]/[20] -> ' ', 's', 'g' (chars=" sg") match the array-form
+		// captures we have for post-/compact next turns.
+		trailing := "This session is being continued from a previous conversation"
+
+		cases := []struct {
+			ver, wantSuffix, reason string
+		}{
+			{"2.1.138", "4ba", "17:52 production reject parsed_suffix"},
+			{"2.1.143", "7a0", "10:55 / 14:37 production reject parsed_suffix"},
+			{"2.1.144", "585", "18:09 production reject parsed_suffix"},
+		}
+		for _, c := range cases {
+			body := []byte(`{"messages":[{"role":"user","content":"` +
+				flatten(trailing) + `"}]}`)
+			got := computeBillingHeaderSuffix(body, c.ver)
+			assert.Equal(t, c.wantSuffix, got, c.reason)
+		}
+	})
+}
+
 func TestPickBillingHeaderSampleText(t *testing.T) {
 	t.Run("empty list returns empty string", func(t *testing.T) {
 		assert.Equal(t, "", pickBillingHeaderSampleText(nil))

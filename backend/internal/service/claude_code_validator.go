@@ -888,7 +888,7 @@ func extractFirstUserMessageTextFromMap(body map[string]any) string {
 		}
 		switch content := msgMap["content"].(type) {
 		case string:
-			return content
+			return stripInlinedSystemReminders(content)
 		case []any:
 			var texts []string
 			for _, item := range content {

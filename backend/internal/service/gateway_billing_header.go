@@ -66,6 +66,39 @@ func billingHeaderSampleTextShouldSkip(text string) bool {
 	return false
 }
 
+// inlinedSystemReminderCloseTag marks the end of a <system-reminder>...</...>
+// wrapper that some middlewares inline into a single string when they flatten
+// an array-form first user message. Used by stripInlinedSystemReminders to
+// recover the trailing user-authored payload for suffix derivation.
+const inlinedSystemReminderCloseTag = "</system-reminder>"
+
+// stripInlinedSystemReminders unwraps string-form messages[0].content whose
+// payload is an array-form turn that some middleware has concatenated into a
+// single string. The flattened layout always ends with the user-authored or
+// compact-summary text after the last </system-reminder> closing tag, so we
+// strip everything up to and including that tag and trim leading whitespace.
+//
+// Returns the original text unchanged when:
+//   - the text does not contain </system-reminder> (plain string content)
+//   - everything after the last </system-reminder> is whitespace-only (the
+//     flattening produced no recoverable user portion; fall back so the
+//     suffix derivation at least has stable input)
+//
+// Verified against the production reject corpus (ver 2.1.138 / 2.1.143 /
+// 2.1.144) where parsed_suffix algebraically matches the suffix derived from
+// the trailing compact-summary segment of an equivalent array-form body.
+func stripInlinedSystemReminders(text string) string {
+	idx := strings.LastIndex(text, inlinedSystemReminderCloseTag)
+	if idx < 0 {
+		return text
+	}
+	trailing := strings.TrimLeft(text[idx+len(inlinedSystemReminderCloseTag):], " \t\r\n")
+	if trailing == "" {
+		return text
+	}
+	return trailing
+}
+
 // ccEntrypointRe matches cc_entrypoint=<value> inside an x-anthropic-billing-header
 // text block. Scoped to the header prefix to avoid touching user content.
 var ccEntrypointRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcc_entrypoint=)([A-Za-z0-9_-]+)(\s*;)`)
@@ -133,7 +166,7 @@ func extractFirstUserMessageText(body []byte) string {
 		content := msg.Get("content")
 		switch {
 		case content.Type == gjson.String:
-			out = content.String()
+			out = stripInlinedSystemReminders(content.String())
 		case content.IsArray():
 			var texts []string
 			content.ForEach(func(_, item gjson.Result) bool {
