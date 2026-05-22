@@ -541,6 +541,28 @@ func TestClaudeCodeValidator_Validate_RejectsNonAllowedFamily(t *testing.T) {
 	require.False(t, v.Validate(req, map[string]any{}))
 }
 
+func TestRequestIDAttrs(t *testing.T) {
+	t.Run("nil request returns empty values", func(t *testing.T) {
+		attrs := requestIDAttrs(nil)
+		require.Equal(t, []any{"request_id", "", "client_request_id", ""}, attrs)
+	})
+
+	t.Run("empty context returns empty strings", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		attrs := requestIDAttrs(req)
+		require.Equal(t, []any{"request_id", "", "client_request_id", ""}, attrs)
+	})
+
+	t.Run("ids from context are emitted", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		ctx := context.WithValue(req.Context(), ctxkey.RequestID, "req-abc")
+		ctx = context.WithValue(ctx, ctxkey.ClientRequestID, "client-xyz")
+		req = req.WithContext(ctx)
+		attrs := requestIDAttrs(req)
+		require.Equal(t, []any{"request_id", "req-abc", "client_request_id", "client-xyz"}, attrs)
+	})
+}
+
 func TestClaudeCodeValidator_Validate_NonMessagesPathStillNeedsAllowedFamily(t *testing.T) {
 	v := NewClaudeCodeValidator()
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/models", nil)

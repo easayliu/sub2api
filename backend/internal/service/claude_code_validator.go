@@ -20,6 +20,10 @@ import (
 // random scanners / browsers / non-CLI tools constantly hit that path and the
 // noise would drown out useful signal. Anything reaching Step 4 has already
 // produced a CLI-shaped UA and is worth surfacing.
+//
+// Always attaches request_id / client_request_id (when present in context) so
+// rejects can be correlated with downstream gateway / ops logs sharing those
+// fields.
 func logRejected(r *http.Request, step, reason string, extras ...any) {
 	attrs := []any{
 		"step", step,
@@ -27,8 +31,22 @@ func logRejected(r *http.Request, step, reason string, extras ...any) {
 		"ua", r.Header.Get("User-Agent"),
 		"path", r.URL.Path,
 	}
+	attrs = append(attrs, requestIDAttrs(r)...)
 	attrs = append(attrs, extras...)
 	slog.Warn("claude_code_validator_reject", attrs...)
+}
+
+// requestIDAttrs reads request_id / client_request_id from the request's
+// context and returns them as slog key/value pairs. Empty values are
+// included so log aggregators can still index the keys consistently.
+func requestIDAttrs(r *http.Request) []any {
+	if r == nil {
+		return []any{"request_id", "", "client_request_id", ""}
+	}
+	ctx := r.Context()
+	reqID, _ := ctx.Value(ctxkey.RequestID).(string)
+	clientReqID, _ := ctx.Value(ctxkey.ClientRequestID).(string)
+	return []any{"request_id", reqID, "client_request_id", clientReqID}
 }
 
 // logRejectedWithShape is logRejected plus a structured fingerprint snapshot
@@ -899,25 +917,31 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 	// for the candidate filter (minimum length guard).
 	if stringContent, ok := stringContentOfFirstUserMessage(body); ok &&
 		reverseMatchInlinedSRInner(stringContent, uaVersion, parsedSuffix) {
-		slog.Info("claude_code_validator_reverse_matched_inner_sr",
+		attrs := []any{
 			"step", "4.4_cc_version",
 			"ua", r.Header.Get("User-Agent"),
 			"ua_version", uaVersion,
 			"parsed_suffix", parsedSuffix,
 			"primary_expected_suffix", expected,
-			"first_user_text_runes", utf8.RuneCountInString(firstUserText))
+			"first_user_text_runes", utf8.RuneCountInString(firstUserText),
+		}
+		attrs = append(attrs, requestIDAttrs(r)...)
+		slog.Info("claude_code_validator_reverse_matched_inner_sr", attrs...)
 		return true
 	}
 
 	// suffix mismatch — 是否拒绝取决于 strictCCVersionEnabled。
 	if !v.strictCCVersionEnabled(r.Context()) {
-		slog.Info("claude_code_validator_suffix_mismatch_relaxed",
+		attrs := []any{
 			"step", "4.4_cc_version",
 			"ua", r.Header.Get("User-Agent"),
 			"ua_version", uaVersion,
 			"parsed_suffix", parsedSuffix,
 			"expected_suffix", expected,
-			"first_user_text_runes", utf8.RuneCountInString(firstUserText))
+			"first_user_text_runes", utf8.RuneCountInString(firstUserText),
+		}
+		attrs = append(attrs, requestIDAttrs(r)...)
+		slog.Info("claude_code_validator_suffix_mismatch_relaxed", attrs...)
 		return true
 	}
 	logRejectedWithShape(r, body, "4.4_cc_version", "suffix_mismatch",
