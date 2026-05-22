@@ -745,7 +745,8 @@ func TestDescribeMsg0ContentBlocks(t *testing.T) {
 		require.Equal(t, "content_null", describeMsg0ContentBlocks(body))
 	})
 
-	t.Run("string content renders content_string with len and head", func(t *testing.T) {
+	t.Run("short string content - head only, no tail (would overlap)", func(t *testing.T) {
+		// 28 runes <= 2 * msg0BlockHeadRunes (48) → no tail emitted.
 		body := map[string]any{
 			"messages": []any{
 				map[string]any{"role": "user", "content": "hello world this is a string"},
@@ -755,16 +756,47 @@ func TestDescribeMsg0ContentBlocks(t *testing.T) {
 		require.Equal(t, "content_string:len=28:head=hello world this is a st", got)
 	})
 
-	t.Run("long string content truncates head to msg0BlockHeadRunes", func(t *testing.T) {
-		long := strings.Repeat("a", msg0BlockHeadRunes+50)
+	t.Run("long string content emits both head and tail", func(t *testing.T) {
+		// 24 'a' + 10 '-' + 24 'b' = 58 runes > 2*24, so head=24 'a' and
+		// tail=24 'b' are both shown.
 		body := map[string]any{
 			"messages": []any{
-				map[string]any{"role": "user", "content": long},
+				map[string]any{"role": "user", "content": strings.Repeat("a", 24) + strings.Repeat("-", 10) + strings.Repeat("b", 24)},
 			},
 		}
 		got := describeMsg0ContentBlocks(body)
-		expectedHead := strings.Repeat("a", msg0BlockHeadRunes)
-		require.Equal(t, "content_string:len="+strconv.Itoa(msg0BlockHeadRunes+50)+":head="+expectedHead, got)
+		require.Equal(t,
+			"content_string:len=58:head="+strings.Repeat("a", 24)+":tail="+strings.Repeat("b", 24),
+			got)
+	})
+
+	t.Run("string boundary case at 2*msg0BlockHeadRunes - no tail", func(t *testing.T) {
+		// len == 48 == 2*24 → still no tail (strictly greater required).
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": strings.Repeat("x", 2*msg0BlockHeadRunes)},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Equal(t,
+			"content_string:len="+strconv.Itoa(2*msg0BlockHeadRunes)+":head="+strings.Repeat("x", msg0BlockHeadRunes),
+			got)
+	})
+
+	t.Run("tail reveals close-tag-at-end forgery (whole content wrapped in single SR)", func(t *testing.T) {
+		// Simulates the suspected forge body where everything is wrapped in
+		// one <system-reminder>...</system-reminder>, including the trailing
+		// real text. tail surfaces the close tag at the very end.
+		content := "<system-reminder>\n" + strings.Repeat("Called something\n", 5) + "This session is being continued from a previous conversation</system-reminder>"
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": content},
+			},
+		}
+		got := describeMsg0ContentBlocks(body)
+		require.Contains(t, got, "head=<system-reminder>⏎Called")
+		require.Contains(t, got, "tail=")
+		require.Contains(t, got, "</system-reminder>")
 	})
 
 	t.Run("string content with newline collapses to ⏎", func(t *testing.T) {

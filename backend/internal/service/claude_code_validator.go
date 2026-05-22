@@ -630,8 +630,10 @@ const msg0BlockHeadRunes = 24
 //   - "msg0_non_object"                   — msg[0] is not an object
 //   - "no_content"                        — msg[0] lacks a content field
 //   - "content_null"                      — content key present but null
-//   - "content_string:len=N:head=<24r>"   — content is a string (forgery
-//     tell — real CLI always uses array form for the first user message)
+//   - "content_string:len=N:head=<24r>:tail=<24r>" — content is a string
+//     (forgery tell — real CLI always uses array form for the first user
+//     message). tail is omitted when len <= msg0BlockHeadRunes (head already
+//     covers the whole text) or when head and tail would overlap.
 //   - "content_wrong_type:<go-type>"      — content is something else
 //   - "<i>:<kind>:len=N:head=<24r>"       — per-block, joined by "|", when
 //     content is an array; non-text blocks show only their type
@@ -672,14 +674,26 @@ func describeMsg0ContentBlocks(body map[string]any) string {
 // formatStringContentPreview renders the diagnostic line for a string-form
 // messages[0].content. Real CLI never sends string form for the first user
 // message, so seeing this is itself a forgery tell.
+//
+// Includes a tail=<24r> preview when the string is long enough that head
+// and tail do not overlap, so we can tell apart "<sr>...</sr> + user text"
+// (tail = user text) from "<sr>...all-content-including-summary...</sr>"
+// (tail = </system-reminder>) — both shapes start the same way but the
+// stripInlinedSystemReminders sampling differs.
 func formatStringContentPreview(content string) string {
 	runes := []rune(content)
-	head := runes
-	if len(head) > msg0BlockHeadRunes {
-		head = head[:msg0BlockHeadRunes]
+	headEnd := len(runes)
+	if headEnd > msg0BlockHeadRunes {
+		headEnd = msg0BlockHeadRunes
 	}
-	return "content_string:len=" + strconv.Itoa(len(runes)) +
-		":head=" + systemPreviewNewlineReplacer.Replace(string(head))
+	head := systemPreviewNewlineReplacer.Replace(string(runes[:headEnd]))
+	out := "content_string:len=" + strconv.Itoa(len(runes)) + ":head=" + head
+	// Only add tail when it would not overlap with head.
+	if len(runes) > 2*msg0BlockHeadRunes {
+		tail := systemPreviewNewlineReplacer.Replace(string(runes[len(runes)-msg0BlockHeadRunes:]))
+		out += ":tail=" + tail
+	}
+	return out
 }
 
 // formatArrayContentPreview renders the per-block layout for an array-form
