@@ -444,6 +444,7 @@ import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { useAccountUsageCache } from '@/composables/useAccountUsageCache'
 import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
@@ -468,7 +469,12 @@ const desktopViewportQuery = '(min-width: 768px)'
 const loading = ref(false)
 const activeQueryLoading = ref(false)
 const error = ref<string | null>(null)
-const usageInfo = ref<AccountUsageInfo | null>(null)
+// usageInfo 改由模块级缓存提供（按 account.id），跨虚拟滚动的 unmount/remount 保留，
+// 避免单元格滚出视口再滚回时重复请求 /usage。
+const usageCache = useAccountUsageCache()
+const usageInfo = computed<AccountUsageInfo | null>(
+  () => usageCache.get(props.account.id)?.data ?? null
+)
 const rootRef = ref<HTMLElement | null>(null)
 const isDesktopViewport = ref(
   typeof window === 'undefined' ? true : window.matchMedia(desktopViewportQuery).matches
@@ -521,6 +527,11 @@ const hasOpenAIUsageFallback = computed(() => {
 })
 
 const openAIUsageRefreshKey = computed(() => buildOpenAIUsageRefreshKey(props.account))
+
+// 缓存新鲜度签名：手动刷新令牌或 openAI 刷新键变化时签名改变，从而使缓存失效并触发重拉。
+const usageFetchSignature = computed(
+  () => `${props.manualRefreshToken}:${openAIUsageRefreshKey.value}`
+)
 
 const shouldAutoLoadUsageOnMount = computed(() => {
   return shouldFetchUsage.value
@@ -948,7 +959,8 @@ const loadUsage = async (source?: 'passive' | 'active') => {
   error.value = null
 
   try {
-    usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, source)
+    const data = await adminAPI.accounts.getUsage(props.account.id, source)
+    usageCache.set(props.account.id, data, usageFetchSignature.value)
   } catch (e: any) {
     error.value = t('common.error')
     console.error('Failed to load usage:', e)
@@ -1010,7 +1022,8 @@ const attachVisibilityObserver = () => {
 const loadActiveUsage = async () => {
   activeQueryLoading.value = true
   try {
-    usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active')
+    const data = await adminAPI.accounts.getUsage(props.account.id, 'active')
+    usageCache.set(props.account.id, data, usageFetchSignature.value)
   } catch (e: any) {
     console.error('Failed to load active usage:', e)
   } finally {
@@ -1120,6 +1133,9 @@ onMounted(() => {
   }
 
   if (!shouldAutoLoadUsageOnMount.value) return
+  // 命中新鲜缓存（签名一致）时直接复用，避免虚拟滚动 remount 触发的重复请求。
+  const cached = usageCache.get(props.account.id)
+  if (cached && cached.signature === usageFetchSignature.value) return
   const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
   requestAutoLoad(source)
 })
