@@ -147,6 +147,7 @@ func redeemCodeListOrder(params pagination.PaginationParams) []func(*entsql.Sele
 	sortOrder := params.NormalizedSortOrder(pagination.SortOrderDesc)
 
 	var field string
+	nullable := false
 	switch sortBy {
 	case "type":
 		field = redeemcode.FieldType
@@ -156,6 +157,7 @@ func redeemCodeListOrder(params pagination.PaginationParams) []func(*entsql.Sele
 		field = redeemcode.FieldStatus
 	case "used_at":
 		field = redeemcode.FieldUsedAt
+		nullable = true
 	case "created_at":
 		field = redeemcode.FieldCreatedAt
 	case "code":
@@ -165,9 +167,9 @@ func redeemCodeListOrder(params pagination.PaginationParams) []func(*entsql.Sele
 	}
 
 	if sortOrder == pagination.SortOrderAsc {
-		return []func(*entsql.Selector){dbent.Asc(field), dbent.Asc(redeemcode.FieldID)}
+		return []func(*entsql.Selector){orderField(field, false, nullable), dbent.Asc(redeemcode.FieldID)}
 	}
-	return []func(*entsql.Selector){dbent.Desc(field), dbent.Desc(redeemcode.FieldID)}
+	return []func(*entsql.Selector){orderField(field, true, nullable), dbent.Desc(redeemcode.FieldID)}
 }
 
 func (r *redeemCodeRepository) Update(ctx context.Context, code *service.RedeemCode) error {

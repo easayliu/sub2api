@@ -392,6 +392,7 @@ func apiKeyListOrder(params pagination.PaginationParams) []func(*entsql.Selector
 	sortOrder := params.NormalizedSortOrder(pagination.SortOrderDesc)
 
 	var field string
+	nullable := false
 	switch sortBy {
 	case "name":
 		field = apikey.FieldName
@@ -399,8 +400,10 @@ func apiKeyListOrder(params pagination.PaginationParams) []func(*entsql.Selector
 		field = apikey.FieldStatus
 	case "expires_at":
 		field = apikey.FieldExpiresAt
+		nullable = true
 	case "last_used_at":
 		field = apikey.FieldLastUsedAt
+		nullable = true
 	case "created_at":
 		field = apikey.FieldCreatedAt
 	default:
@@ -408,9 +411,9 @@ func apiKeyListOrder(params pagination.PaginationParams) []func(*entsql.Selector
 	}
 
 	if sortOrder == pagination.SortOrderAsc {
-		return []func(*entsql.Selector){dbent.Asc(field), dbent.Asc(apikey.FieldID)}
+		return []func(*entsql.Selector){orderField(field, false, nullable), dbent.Asc(apikey.FieldID)}
 	}
-	return []func(*entsql.Selector){dbent.Desc(field), dbent.Desc(apikey.FieldID)}
+	return []func(*entsql.Selector){orderField(field, true, nullable), dbent.Desc(apikey.FieldID)}
 }
 
 // SearchAPIKeys searches API keys by user ID and/or keyword (name)

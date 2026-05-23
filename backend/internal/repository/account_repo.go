@@ -580,6 +580,9 @@ func accountListOrder(params pagination.PaginationParams) []func(*entsql.Selecto
 
 	field := dbaccount.FieldName
 	defaultOrder := true
+	// nullable 标记可为空字段：这类字段需要 NULLS LAST，否则 PostgreSQL 默认把 NULL
+	// 当作最大值，DESC 时会把无值记录（如从未使用过的账号）排到最前面。
+	nullable := false
 	switch sortBy {
 	case "", "name":
 		field = dbaccount.FieldName
@@ -601,21 +604,24 @@ func accountListOrder(params pagination.PaginationParams) []func(*entsql.Selecto
 	case "last_used_at":
 		field = dbaccount.FieldLastUsedAt
 		defaultOrder = false
+		nullable = true
 	case "expires_at":
 		field = dbaccount.FieldExpiresAt
 		defaultOrder = false
+		nullable = true
 	case "created_at":
 		field = dbaccount.FieldCreatedAt
 		defaultOrder = false
 	}
 
-	if sortOrder == pagination.SortOrderDesc {
-		return []func(*entsql.Selector){dbent.Desc(field), dbent.Desc(dbaccount.FieldID)}
-	}
-	if defaultOrder {
+	desc := sortOrder == pagination.SortOrderDesc
+	if !desc && defaultOrder {
 		return []func(*entsql.Selector){dbent.Asc(dbaccount.FieldName), dbent.Asc(dbaccount.FieldID)}
 	}
-	return []func(*entsql.Selector){dbent.Asc(field), dbent.Asc(dbaccount.FieldID)}
+	if desc {
+		return []func(*entsql.Selector){orderField(field, true, nullable), dbent.Desc(dbaccount.FieldID)}
+	}
+	return []func(*entsql.Selector){orderField(field, false, nullable), dbent.Asc(dbaccount.FieldID)}
 }
 
 func (r *accountRepository) ListByGroup(ctx context.Context, groupID int64) ([]service.Account, error) {

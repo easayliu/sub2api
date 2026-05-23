@@ -162,6 +162,7 @@ func promoCodeListOrder(params pagination.PaginationParams) []func(*entsql.Selec
 	sortOrder := params.NormalizedSortOrder(pagination.SortOrderDesc)
 
 	var field string
+	nullable := false
 	switch sortBy {
 	case "bonus_amount":
 		field = promocode.FieldBonusAmount
@@ -169,6 +170,7 @@ func promoCodeListOrder(params pagination.PaginationParams) []func(*entsql.Selec
 		field = promocode.FieldStatus
 	case "expires_at":
 		field = promocode.FieldExpiresAt
+		nullable = true
 	case "created_at":
 		field = promocode.FieldCreatedAt
 	case "code":
@@ -178,9 +180,9 @@ func promoCodeListOrder(params pagination.PaginationParams) []func(*entsql.Selec
 	}
 
 	if sortOrder == pagination.SortOrderAsc {
-		return []func(*entsql.Selector){dbent.Asc(field), dbent.Asc(promocode.FieldID)}
+		return []func(*entsql.Selector){orderField(field, false, nullable), dbent.Asc(promocode.FieldID)}
 	}
-	return []func(*entsql.Selector){dbent.Desc(field), dbent.Desc(promocode.FieldID)}
+	return []func(*entsql.Selector){orderField(field, true, nullable), dbent.Desc(promocode.FieldID)}
 }
 
 func (r *promoCodeRepository) CreateUsage(ctx context.Context, usage *service.PromoCodeUsage) error {

@@ -173,6 +173,8 @@ func announcementListOrder(params pagination.PaginationParams) (string, string) 
 
 func announcementListOrders(params pagination.PaginationParams) []func(*entsql.Selector) {
 	field, sortOrder := announcementListOrder(params)
+	// starts_at / ends_at 可为空，需要 NULLS LAST，避免 DESC 时无值公告排到最前。
+	nullable := field == announcement.FieldStartsAt || field == announcement.FieldEndsAt
 
 	if sortOrder == pagination.SortOrderAsc {
 		if field == announcement.FieldID {
@@ -181,7 +183,7 @@ func announcementListOrders(params pagination.PaginationParams) []func(*entsql.S
 			}
 		}
 		return []func(*entsql.Selector){
-			dbent.Asc(field),
+			orderField(field, false, nullable),
 			dbent.Asc(announcement.FieldID),
 		}
 	}
@@ -192,7 +194,7 @@ func announcementListOrders(params pagination.PaginationParams) []func(*entsql.S
 		}
 	}
 	return []func(*entsql.Selector){
-		dbent.Desc(field),
+		orderField(field, true, nullable),
 		dbent.Desc(announcement.FieldID),
 	}
 }
