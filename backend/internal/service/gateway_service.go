@@ -6530,17 +6530,17 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// Sync billing-header cc_version with the UA we will actually send.
-	// Mimic uses the canonical UA (locked to the prompt-template version we
-	// fully replicate). Real Claude Code CLI passthrough and non-OAuth
-	// API-key traffic both use the per-account cached fingerprint UA so the
-	// outgoing cc_version in body stays in lockstep with the UA header that
-	// ApplyUAFingerprint / ApplyFingerprint will write below.
+	// Mimic and real-CC passthrough both prefer the per-account cached
+	// fingerprint UA so the outgoing cc_version in body stays in lockstep
+	// with the UA header that ApplyUAFingerprint / ApplyFingerprint will
+	// write below. Falling back to the canonical hardcoded UA is only for
+	// the edge case where no fingerprint has been established yet.
 	syncUA := ""
 	switch {
-	case mimicClaudeCode:
-		syncUA = claude.DefaultHeaders["User-Agent"]
 	case fingerprint != nil:
 		syncUA = fingerprint.UserAgent
+	case mimicClaudeCode:
+		syncUA = claude.DefaultHeaders["User-Agent"]
 	}
 	if syncUA != "" {
 		body = syncBillingHeaderVersion(body, syncUA)
@@ -6616,7 +6616,14 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		// Only pin UA for mimic clients (non-Claude-Code tools using OAuth
 		// credentials). Real Claude Code CLI traffic is passed through
 		// verbatim so upstream sees the client's actual UA/version.
-		if mimicClaudeCode {
+		//
+		// When fingerprint exists, ApplyFingerprint above has already set
+		// the account-locked UA — leave it alone so the upstream cc_version
+		// in body (derived via the same fingerprint UA in syncUA above) and
+		// the wire User-Agent header stay consistent on a per-account basis.
+		// Falling back to the canonical hardcoded UA is only for the edge
+		// case where no fingerprint exists yet.
+		if mimicClaudeCode && fingerprint == nil {
 			if pinnedUA := claude.DefaultHeaders["User-Agent"]; pinnedUA != "" {
 				setHeaderRaw(req.Header, "User-Agent", pinnedUA)
 			}
