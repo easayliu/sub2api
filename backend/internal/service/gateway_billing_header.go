@@ -176,15 +176,47 @@ func utf8RuneCount(s string) int {
 }
 
 // reverseMatchInlinedSRInner reports whether any <system-reminder> inner in
-// the flattened string-form content algebraically hashes to parsedSuffix
-// under the v2.1.77+ derivation. Used as a fallback when our primary picker
-// disagrees with parsedSuffix — covers middleware/forge multi-SR layouts
-// where the compact-summary block sits in a non-last position. The strict
-// minimum-inner-length guard (see minReverseSuffixInnerRunes) prevents
-// trivial collisions on whitespace-only / very short segments.
+// the flattened string-form content contains a starting offset whose
+// chars at [+4, +7, +20] hash to parsedSuffix under the v2.1.77+
+// derivation. Used as a fallback when our primary picker disagrees with
+// parsedSuffix — covers middleware/forge layouts where:
+//
+//   - multi-SR string with compact summary in a non-last SR (offset 0 hit
+//     on one of the inners)
+//   - single-SR wrap containing the compact summary as a substring inside
+//     a larger tool-call/result blob (sliding window hits at the offset
+//     where "This session is being co..." begins)
+//
+// The strict minimum-inner-length guard (see minReverseSuffixInnerRunes)
+// prevents trivial collisions on whitespace-only / very short inners.
+// Within each qualifying inner, every rune offset i where
+// runes[i+4]/[i+7]/[i+20] are all in range is tried.
 func reverseMatchInlinedSRInner(text, version, parsedSuffix string) bool {
 	for _, inner := range extractInlinedSystemReminderInners(text) {
-		if computeBillingHeaderSuffixFromText(inner, version) == parsedSuffix {
+		if reverseSuffixMatchAnyOffset(inner, version, parsedSuffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// reverseSuffixMatchAnyOffset scans every rune offset i in text where
+// positions [i+4]/[i+7]/[i+20] are all in range, computing the
+// v2.1.77+ suffix from those chars and returning true on first match.
+// Requires text length >= minReverseSuffixInnerRunes so that at least
+// offset 0 is a viable candidate. SHA256 per offset is microsecond-cheap;
+// even a 27k-rune inner finishes in tens of milliseconds and only runs on
+// the fallback path (post primary mismatch).
+func reverseSuffixMatchAnyOffset(text, version, parsedSuffix string) bool {
+	runes := []rune(text)
+	n := len(runes)
+	if n < minReverseSuffixInnerRunes {
+		return false
+	}
+	for i := 0; i+20 < n; i++ {
+		chars := []rune{runes[i+4], runes[i+7], runes[i+20]}
+		sum := sha256.Sum256([]byte(billingHeaderSuffixSalt + string(chars) + version))
+		if hex.EncodeToString(sum[:])[:3] == parsedSuffix {
 			return true
 		}
 	}

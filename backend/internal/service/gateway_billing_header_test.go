@@ -357,6 +357,48 @@ func TestReverseMatchInlinedSRInner(t *testing.T) {
 		assert.False(t, reverseMatchInlinedSRInner(flat, ver, "0b7"),
 			"empty SR inner must not be a viable reverse-match candidate")
 	})
+
+	t.Run("matches via sliding window when compact summary embedded in single SR", func(t *testing.T) {
+		// 19:38 production reject (ver 2.1.150, parsed=22b): single-SR wrap
+		// containing tool-call/result blob with compact-summary text
+		// embedded as a substring (not as a separate SR pair). The sliding
+		// window inside reverseSuffixMatchAnyOffset must find it.
+		ver := "2.1.150"
+		flat := "<system-reminder>\n" +
+			"Called Bash command with args foo bar baz qux quux.\n" +
+			"This session is being continued from a previous conversation\n" +
+			"Result: read file /path/to/file.java -> ava\"}\n" +
+			"</system-reminder>"
+		assert.True(t, reverseMatchInlinedSRInner(flat, ver, "22b"))
+	})
+}
+
+func TestReverseSuffixMatchAnyOffset(t *testing.T) {
+	t.Run("text too short returns false", func(t *testing.T) {
+		assert.False(t, reverseSuffixMatchAnyOffset("short", "2.1.150", "ffe"))
+	})
+
+	t.Run("matches at offset 0", func(t *testing.T) {
+		// "This session is being co..." → chars at [4,7,20] = ' ', 's', 'g'
+		// → " sg" + 2.1.150 → 22b
+		text := "This session is being continued from a previous conversation"
+		assert.True(t, reverseSuffixMatchAnyOffset(text, "2.1.150", "22b"))
+	})
+
+	t.Run("matches at non-zero offset (compact summary embedded inside)", func(t *testing.T) {
+		// 19:38 production reject pattern: compact summary text is embedded
+		// inside a larger tool-call/result blob. Window slides to the offset
+		// where "This session..." begins and matches " sg" chars there.
+		text := "Called Bash to do X.\n" +
+			"This session is being continued from a previous conversation\n" +
+			"Result: file ava\"}"
+		assert.True(t, reverseSuffixMatchAnyOffset(text, "2.1.150", "22b"))
+	})
+
+	t.Run("no match returns false even if text long", func(t *testing.T) {
+		text := strings.Repeat("xyz123abcXYZ", 20)
+		assert.False(t, reverseSuffixMatchAnyOffset(text, "2.1.150", "22b"))
+	})
 }
 
 func TestStringContentOfFirstUserMessage(t *testing.T) {
