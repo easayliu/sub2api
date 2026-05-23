@@ -480,14 +480,32 @@ func TestPickBillingHeaderSampleText(t *testing.T) {
 		assert.Equal(t, "https://cert.example.com", got)
 	})
 
-	t.Run("<command-name> with no following stdout - samples <command-name>", func(t *testing.T) {
-		// Degenerate / defensive: no stdout block at all → treat slash
-		// command as user intent (same as empty stdout case).
+	t.Run("<command-name> with no caveat - skipped, samples user input", func(t *testing.T) {
+		// 2026-05-22 18:22 /mcp first-run pattern: no <local-command-caveat>
+		// in the block list → CLI skips <command-name> and samples the
+		// user's typed follow-up. Without caveat, slash command is treated
+		// as a one-off transition, not the "user intent".
 		got := pickBillingHeaderSampleText([]string{
 			"<command-name>/clear</command-name>",
 			"user input",
 		})
-		assert.Equal(t, "<command-name>/clear</command-name>", got)
+		assert.Equal(t, "user input", got)
+	})
+
+	t.Run("/mcp with caveat (replayed session) - samples <command-name>", func(t *testing.T) {
+		// 2026-05-23 21:51 production reject: two /mcp invocations in a row
+		// with caveat present → CLI sampled <command-name>/mcp, not the
+		// user's trailing Chinese question.
+		got := pickBillingHeaderSampleText([]string{
+			"<system-reminder>x</system-reminder>",
+			"<local-command-caveat>Caveat: ...</local-command-caveat>",
+			"<command-name>/mcp</command-name>",
+			"<local-command-stdout>MCP server status</local-command-stdout>",
+			"<command-name>/mcp</command-name>",
+			"<local-command-stdout>MCP server status 2</local-command-stdout>",
+			"user question after",
+		})
+		assert.Equal(t, "<command-name>/mcp</command-name>", got)
 	})
 
 	t.Run("/compact (compact summary block before <command-name>) - samples summary", func(t *testing.T) {
@@ -516,32 +534,31 @@ func TestPickBillingHeaderSampleText(t *testing.T) {
 	})
 }
 
-func TestHasNonEmptyLocalCommandStdoutAhead(t *testing.T) {
-	t.Run("no stdout block", func(t *testing.T) {
-		assert.False(t, hasNonEmptyLocalCommandStdoutAhead([]string{"foo", "bar"}))
-	})
-
-	t.Run("empty stdout block", func(t *testing.T) {
-		assert.False(t, hasNonEmptyLocalCommandStdoutAhead([]string{
-			"<local-command-stdout></local-command-stdout>",
+func TestHasLocalCommandCaveat(t *testing.T) {
+	t.Run("no caveat block returns false", func(t *testing.T) {
+		assert.False(t, hasLocalCommandCaveat([]string{
+			"<system-reminder>foo</system-reminder>",
+			"user input",
 		}))
 	})
 
-	t.Run("whitespace-only stdout block", func(t *testing.T) {
-		assert.False(t, hasNonEmptyLocalCommandStdoutAhead([]string{
-			"<local-command-stdout>   \n  </local-command-stdout>",
+	t.Run("caveat block returns true", func(t *testing.T) {
+		assert.True(t, hasLocalCommandCaveat([]string{
+			"<system-reminder>foo</system-reminder>",
+			"<local-command-caveat>Caveat: ...</local-command-caveat>",
+			"<command-name>/clear</command-name>",
 		}))
 	})
 
-	t.Run("non-empty stdout block", func(t *testing.T) {
-		assert.True(t, hasNonEmptyLocalCommandStdoutAhead([]string{
-			"<local-command-stdout>MCP server status</local-command-stdout>",
+	t.Run("caveat anywhere in list counts", func(t *testing.T) {
+		assert.True(t, hasLocalCommandCaveat([]string{
+			"user input",
+			"<local-command-caveat>...</local-command-caveat>",
 		}))
 	})
 
-	t.Run("non-empty stdout among other blocks", func(t *testing.T) {
-		assert.True(t, hasNonEmptyLocalCommandStdoutAhead([]string{
-			"some user content",
+	t.Run("stdout-only does not count", func(t *testing.T) {
+		assert.False(t, hasLocalCommandCaveat([]string{
 			"<local-command-stdout>output</local-command-stdout>",
 		}))
 	})

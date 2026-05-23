@@ -41,11 +41,9 @@ var billingHeaderSampleSkipPrefixes = []string{
 	"<local-",
 }
 
-const commandNameOpenTag = "<command-name>"
-
 const (
-	localCommandStdoutOpenTag  = "<local-command-stdout>"
-	localCommandStdoutCloseTag = "</local-command-stdout>"
+	commandNameOpenTag        = "<command-name>"
+	localCommandCaveatOpenTag = "<local-command-caveat>"
 )
 
 // pickBillingHeaderSampleText selects, from text-block contents in
@@ -54,30 +52,36 @@ const (
 //
 // Rule:
 //   - Unconditionally skip <system-reminder> and <local-* (caveat/stdout)
-//   - For <command-name> blocks, look ahead for a matching
-//     <local-command-stdout> in the remaining blocks:
-//     · stdout is NON-empty → this is an informational slash command
-//     (/mcp, /help, /agents, etc.); CLI treats the user's next input
-//     as the "first user text", so skip <command-name>.
-//     · stdout is EMPTY or absent → this is a state-mutating slash
-//     command (/clear); CLI treats the slash command itself as the
-//     user intent, so sample <command-name>.
+//   - For <command-name> blocks, presence of a <local-command-caveat>
+//     anywhere in the block list decides:
+//     · caveat PRESENT → the slash command is the "user intent" for this
+//     turn (history of local commands exists, the new turn IS the
+//     command itself), so SAMPLE <command-name>.
+//     · caveat ABSENT  → the slash command is a one-off transition and
+//     the user's typed follow-up is the real "first user text", so
+//     SKIP <command-name> and continue looking.
 //   - Fall back to the last entry if every block is skipped (defensive;
 //     real CLI traffic always leaves at least one payload block).
 //
-// Conditional rule verified against:
-//   - 2026-05-22 18:22 /mcp reject (non-empty stdout): CLI sampled user URL
-//   - 2026-05-22 18:48 /clear reject (empty stdout): CLI sampled <command-name>/clear
-//   - capture/0521/025-036 (/clear with empty stdout): historical baseline
+// The caveat-presence rule was reverse-engineered from:
+//   - capture/0521/025/036 + 2026-05-22 18:48 /clear: caveat present →
+//     CLI sampled <command-name>/clear (chars "md<")
+//   - 2026-05-22 18:22 /mcp first run: caveat absent → CLI sampled trailing
+//     user URL (chars "s/a"), not <command-name>/mcp
+//   - 2026-05-23 21:51 /mcp invoked twice in session: caveat present →
+//     CLI sampled <command-name>/mcp (chars "mdc") despite the trailing
+//     user prompt being a real Chinese question
+//
+// /compact is unaffected because its compact-summary block sits before
+// <command-name> and is picked first regardless of caveat state.
 func pickBillingHeaderSampleText(texts []string) string {
-	for i, t := range texts {
+	hasCaveat := hasLocalCommandCaveat(texts)
+	for _, t := range texts {
 		if billingHeaderSampleTextShouldSkip(t) {
 			continue
 		}
-		if strings.HasPrefix(t, commandNameOpenTag) {
-			if hasNonEmptyLocalCommandStdoutAhead(texts[i+1:]) {
-				continue
-			}
+		if strings.HasPrefix(t, commandNameOpenTag) && !hasCaveat {
+			continue
 		}
 		return t
 	}
@@ -96,20 +100,14 @@ func billingHeaderSampleTextShouldSkip(text string) bool {
 	return false
 }
 
-// hasNonEmptyLocalCommandStdoutAhead reports whether any of the remaining
-// text blocks is a <local-command-stdout>...</local-command-stdout> with
-// non-empty content. Used to distinguish informational slash commands
-// (non-empty stdout, e.g. /mcp showing server status) from state-mutating
-// ones (empty stdout, e.g. /clear printing nothing) when deciding whether
-// to skip the preceding <command-name> block.
-func hasNonEmptyLocalCommandStdoutAhead(remaining []string) bool {
-	for _, t := range remaining {
-		if !strings.HasPrefix(t, localCommandStdoutOpenTag) {
-			continue
-		}
-		inner := strings.TrimPrefix(t, localCommandStdoutOpenTag)
-		inner = strings.TrimSuffix(inner, localCommandStdoutCloseTag)
-		if strings.TrimSpace(inner) != "" {
+// hasLocalCommandCaveat reports whether any block starts with
+// <local-command-caveat>. CLI injects that block when the conversation
+// already contains historical local-command records — see
+// pickBillingHeaderSampleText for how its presence flips the
+// <command-name> sampling decision.
+func hasLocalCommandCaveat(texts []string) bool {
+	for _, t := range texts {
+		if strings.HasPrefix(t, localCommandCaveatOpenTag) {
 			return true
 		}
 	}
