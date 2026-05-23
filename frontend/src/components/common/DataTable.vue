@@ -76,6 +76,9 @@
             v-for="(column, index) in columns"
             :key="column.key"
             scope="col"
+            :aria-sort="column.sortable
+              ? (sortKey === column.key ? (sortOrder === 'desc' ? 'descending' : 'ascending') : 'none')
+              : undefined"
             :class="[
               'sticky-header-cell py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-dark-400',
               getAdaptivePaddingClass(),
@@ -93,13 +96,15 @@
             >
               <div class="flex items-center space-x-1">
                 <span>{{ column.label }}</span>
-                <span v-if="column.sortable" class="text-gray-400 dark:text-dark-500">
+                <span v-if="column.sortable" class="inline-flex">
+                  <!-- 已排序：升序为向上箭头，降序旋转为向下 -->
                   <svg
                     v-if="sortKey === column.key"
-                    class="h-4 w-4"
+                    class="h-4 w-4 text-gray-700 dark:text-gray-200"
                     :class="{ 'rotate-180 transform': sortOrder === 'desc' }"
                     fill="currentColor"
                     viewBox="0 0 20 20"
+                    aria-hidden="true"
                   >
                     <path
                       fill-rule="evenodd"
@@ -107,9 +112,18 @@
                       clip-rule="evenodd"
                     />
                   </svg>
-                  <svg v-else class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                  <!-- 未排序：中性的上下双向箭头，提示该列可排序但当前无排序 -->
+                  <svg
+                    v-else
+                    class="h-4 w-4 text-gray-300 dark:text-dark-600"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                    aria-hidden="true"
+                  >
                     <path
-                      d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                      fill-rule="evenodd"
+                      d="M10 3a.75.75 0 01.55.24l3.25 3.5a.75.75 0 11-1.1 1.02L10 4.852 7.3 7.76a.75.75 0 01-1.1-1.02l3.25-3.5A.75.75 0 0110 3zm-3.76 9.2a.75.75 0 011.06.04L10 15.148l2.7-2.908a.75.75 0 111.1 1.02l-3.25 3.5a.75.75 0 01-1.1 0l-3.25-3.5a.75.75 0 01.04-1.06z"
+                      clip-rule="evenodd"
                     />
                   </svg>
                 </span>
@@ -428,6 +442,15 @@ const writePersistedSortState = (state: PersistedSortState) => {
   }
 }
 
+const clearPersistedSortState = () => {
+  if (!props.sortStorageKey) return
+  try {
+    localStorage.removeItem(props.sortStorageKey)
+  } catch (e) {
+    console.error('[DataTable] Failed to clear persisted sort state:', e)
+  }
+}
+
 const resolveInitialSortState = (): PersistedSortState | null => {
   const persisted = readPersistedSortState()
   if (persisted) return persisted
@@ -537,20 +560,37 @@ watch(actionsExpanded, async () => {
 })
 
 const handleSort = (key: string) => {
-  let newOrder: 'asc' | 'desc' = 'asc'
+  // 三态循环：未排序 → asc → desc → 取消。
+  // 取消时清空内部排序状态（列头回到中性态），并回落到表格配置的默认排序，
+  // 与后端默认一致；这样既能"取消排序"，又不会让默认方向为 desc 的列卡在 desc↔取消之间。
+  let cleared = false
+  let nextKey = key
+  let nextOrder: 'asc' | 'desc' = 'asc'
   if (sortKey.value === key) {
-    newOrder = sortOrder.value === 'asc' ? 'desc' : 'asc'
+    if (sortOrder.value === 'asc') {
+      nextOrder = 'desc'
+    } else {
+      // 当前为 desc，第三次点击取消该列排序
+      cleared = true
+      nextKey = ''
+      nextOrder = 'asc'
+    }
   }
 
-  if (props.serverSideSort) {
-    // Server-side sort mode: emit event and update internal state for UI feedback
-    sortKey.value = key
-    sortOrder.value = newOrder
-    emit('sort', key, newOrder)
+  sortKey.value = nextKey
+  sortOrder.value = nextOrder
+
+  if (!props.serverSideSort) {
+    // Client-side sort mode: 内部状态已更新，取消时 sortedData 自动回到原始顺序
+    return
+  }
+
+  // Server-side sort mode: emit event
+  if (cleared) {
+    // 回落默认排序（列头保持中性态，但数据按默认顺序）
+    emit('sort', normalizeSortKey(props.defaultSortKey || ''), normalizeSortOrder(props.defaultSortOrder))
   } else {
-    // Client-side sort mode: just update internal state
-    sortKey.value = key
-    sortOrder.value = newOrder
+    emit('sort', nextKey, nextOrder)
   }
 }
 
@@ -690,7 +730,11 @@ watch(
     if (!didInitSort.value) return
     if (!props.sortStorageKey) return
     const key = normalizeSortKey(nextKey)
-    if (!key) return
+    if (!key) {
+      // 排序被取消（中性态），移除持久化，避免下次进入页面又恢复旧排序
+      clearPersistedSortState()
+      return
+    }
     writePersistedSortState({ key, order: normalizeSortOrder(nextOrder) })
   },
   { flush: 'post' }
