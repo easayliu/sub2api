@@ -125,25 +125,22 @@ const (
 )
 
 // inlinedSystemReminderPairRe matches a single <system-reminder>...</system-reminder>
-// pair (non-greedy) in flattened string-form content. Used by
-// extractInlinedSystemReminderInners for the reverse-suffix-match fallback.
+// pair (non-greedy) in flattened string-form content. Used by the
+// diagnostic helper extractInlinedSystemReminderInners (which feeds the
+// per-inner anchor scan in describeCompactAnchorsInMsg0).
 var inlinedSystemReminderPairRe = regexp.MustCompile(
 	`(?s)<system-reminder>(.*?)</system-reminder>`,
 )
 
-// minReverseSuffixInnerRunes is the minimum rune length an SR inner must
-// have to be a candidate in the reverse-suffix-match fallback. Anything
-// shorter than 21 runes has positions [4]/[7]/[20] partly out of range and
-// would default '0' chars — too easy to trivially match by chance.
-const minReverseSuffixInnerRunes = 21
-
 // extractInlinedSystemReminderInners returns the inner contents of every
 // <system-reminder>...</system-reminder> pair embedded inside a flattened
 // string-form messages[0].content. Leading whitespace is trimmed from each
-// inner so SHA256 sampling lines up with the unflattened array-form block.
-// Returns only inners of length >= minReverseSuffixInnerRunes; shorter
-// inners are dropped to avoid weak '0'-padding collisions in the
-// reverse-suffix-match fallback.
+// inner so anchor offsets line up with the unflattened array-form block.
+//
+// Used by describeCompactAnchorsInMsg0 for diagnostic logging only; the
+// reverse-suffix-match fallback that previously relied on this helper was
+// removed once production data showed it primarily rescued forge replays
+// rather than real users.
 func extractInlinedSystemReminderInners(text string) []string {
 	matches := inlinedSystemReminderPairRe.FindAllStringSubmatch(text, -1)
 	if len(matches) == 0 {
@@ -155,7 +152,7 @@ func extractInlinedSystemReminderInners(text string) []string {
 			continue
 		}
 		inner := strings.TrimLeft(m[1], " \t\r\n")
-		if utf8RuneCount(inner) < minReverseSuffixInnerRunes {
+		if inner == "" {
 			continue
 		}
 		out = append(out, inner)
@@ -171,31 +168,6 @@ func utf8RuneCount(s string) int {
 		n++
 	}
 	return n
-}
-
-// reverseMatchInlinedSRInner reports whether any <system-reminder> inner in
-// the flattened string-form content contains a starting offset whose
-// chars at [+4, +7, +20] hash to parsedSuffix under the v2.1.77+
-// derivation. Used as a fallback when our primary picker disagrees with
-// parsedSuffix — covers middleware/forge layouts where:
-//
-//   - multi-SR string with compact summary in a non-last SR (offset 0 hit
-//     on one of the inners)
-//   - single-SR wrap containing the compact summary as a substring inside
-//     a larger tool-call/result blob (sliding window hits at the offset
-//     where "This session is being co..." begins)
-//
-// The strict minimum-inner-length guard (see minReverseSuffixInnerRunes)
-// prevents trivial collisions on whitespace-only / very short inners.
-// Within each qualifying inner, every rune offset i where
-// runes[i+4]/[i+7]/[i+20] are all in range is tried.
-func reverseMatchInlinedSRInner(text, version, parsedSuffix string) bool {
-	for _, inner := range extractInlinedSystemReminderInners(text) {
-		if reverseSuffixMatchAnyOffset(inner, version, parsedSuffix) {
-			return true
-		}
-	}
-	return false
 }
 
 // compactSummaryAnchorText is the deterministic prefix of the
@@ -231,49 +203,6 @@ func findCompactSummaryAnchorOffsets(text string) []int {
 		start = byteIdx + len(compactSummaryAnchorText)
 	}
 	return out
-}
-
-// reverseSuffixMatchAnyOffset scans every rune offset i in text where
-// positions [i+4]/[i+7]/[i+20] are all in range, computing the
-// v2.1.77+ suffix from those chars and returning true on first match.
-// Requires text length >= minReverseSuffixInnerRunes so that at least
-// offset 0 is a viable candidate. SHA256 per offset is microsecond-cheap;
-// even a 27k-rune inner finishes in tens of milliseconds and only runs on
-// the fallback path (post primary mismatch).
-func reverseSuffixMatchAnyOffset(text, version, parsedSuffix string) bool {
-	runes := []rune(text)
-	n := len(runes)
-	if n < minReverseSuffixInnerRunes {
-		return false
-	}
-	for i := 0; i+20 < n; i++ {
-		chars := []rune{runes[i+4], runes[i+7], runes[i+20]}
-		sum := sha256.Sum256([]byte(billingHeaderSuffixSalt + string(chars) + version))
-		if hex.EncodeToString(sum[:])[:3] == parsedSuffix {
-			return true
-		}
-	}
-	return false
-}
-
-// stringContentOfFirstUserMessage returns messages[0].content if and only
-// if it is a string (the flattened form). Returns ("", false) for array-
-// form or any other shape — the reverse-suffix-match fallback only applies
-// to string-form bodies.
-func stringContentOfFirstUserMessage(body map[string]any) (string, bool) {
-	if body == nil {
-		return "", false
-	}
-	msgs, ok := body["messages"].([]any)
-	if !ok || len(msgs) == 0 {
-		return "", false
-	}
-	m0, ok := msgs[0].(map[string]any)
-	if !ok {
-		return "", false
-	}
-	s, ok := m0["content"].(string)
-	return s, ok
 }
 
 // stripInlinedSystemReminders unwraps string-form messages[0].content whose

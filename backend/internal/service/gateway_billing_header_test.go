@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/cespare/xxhash/v2"
@@ -305,71 +304,27 @@ func TestExtractInlinedSystemReminderInners(t *testing.T) {
 	})
 
 	t.Run("single SR pair", func(t *testing.T) {
-		in := "<system-reminder>" + strings.Repeat("a", 25) + "</system-reminder>"
+		in := "<system-reminder>some content</system-reminder>"
 		got := extractInlinedSystemReminderInners(in)
 		require.Len(t, got, 1)
-		assert.Equal(t, strings.Repeat("a", 25), got[0])
+		assert.Equal(t, "some content", got[0])
 	})
 
-	t.Run("short inner is dropped", func(t *testing.T) {
-		// 20 runes < 21 minimum → filtered out
-		in := "<system-reminder>short content here ok</system-reminder>" // 21 char hits the threshold actually let's use shorter
-		// 实际打包：让 inner 严格短于 21
-		in = "<system-reminder>tiny inner</system-reminder>"
-		got := extractInlinedSystemReminderInners(in)
-		assert.Empty(t, got)
+	t.Run("empty inner is dropped", func(t *testing.T) {
+		// <sr></sr> 或 <sr>   </sr> 都不应进入结果（whitespace-only 视为空）
+		got := extractInlinedSystemReminderInners(
+			"<system-reminder></system-reminder><system-reminder>foo</system-reminder>")
+		require.Len(t, got, 1)
+		assert.Equal(t, "foo", got[0])
 	})
 
 	t.Run("multiple SR pairs kept, leading whitespace trimmed", func(t *testing.T) {
-		in := "<system-reminder>\n" + strings.Repeat("a", 30) + "</system-reminder>" +
-			"<system-reminder>  \n" + strings.Repeat("b", 30) + "</system-reminder>"
+		in := "<system-reminder>\nfirst block</system-reminder>" +
+			"<system-reminder>  \nsecond block</system-reminder>"
 		got := extractInlinedSystemReminderInners(in)
 		require.Len(t, got, 2)
-		assert.Equal(t, strings.Repeat("a", 30), got[0])
-		assert.Equal(t, strings.Repeat("b", 30), got[1])
-	})
-}
-
-func TestReverseMatchInlinedSRInner(t *testing.T) {
-	t.Run("matches when one SR inner hashes to target", func(t *testing.T) {
-		ver := "2.1.144"
-		// "This session is being continued from a previous conversation" 起首
-		// for ver 2.1.144 → chars " sg" → suffix 585. Wrap it in an SR inside
-		// a larger flattened content with other SR wrappers.
-		flat := "<system-reminder>\n" + strings.Repeat("X", 30) + "</system-reminder>" +
-			"<system-reminder>\nThis session is being continued from a previous conversation</system-reminder>" +
-			"<system-reminder>\nResult: " + strings.Repeat("Y", 30) + "</system-reminder>"
-		assert.True(t, reverseMatchInlinedSRInner(flat, ver, "585"))
-	})
-
-	t.Run("no match returns false", func(t *testing.T) {
-		ver := "2.1.144"
-		flat := "<system-reminder>\n" + strings.Repeat("X", 30) + "</system-reminder>" +
-			"<system-reminder>\n" + strings.Repeat("Y", 30) + "</system-reminder>"
-		assert.False(t, reverseMatchInlinedSRInner(flat, ver, "585"))
-	})
-
-	t.Run("short SR inner ignored (no trivial '000' collision)", func(t *testing.T) {
-		ver := "2.1.148"
-		// Empty inner would yield chars "000" → 0b7 for ver 2.1.148; the
-		// minimum-length guard must keep this from matching.
-		flat := "<system-reminder></system-reminder><system-reminder>" + strings.Repeat("a", 30) + "</system-reminder>"
-		assert.False(t, reverseMatchInlinedSRInner(flat, ver, "0b7"),
-			"empty SR inner must not be a viable reverse-match candidate")
-	})
-
-	t.Run("matches via sliding window when compact summary embedded in single SR", func(t *testing.T) {
-		// 19:38 production reject (ver 2.1.150, parsed=22b): single-SR wrap
-		// containing tool-call/result blob with compact-summary text
-		// embedded as a substring (not as a separate SR pair). The sliding
-		// window inside reverseSuffixMatchAnyOffset must find it.
-		ver := "2.1.150"
-		flat := "<system-reminder>\n" +
-			"Called Bash command with args foo bar baz qux quux.\n" +
-			"This session is being continued from a previous conversation\n" +
-			"Result: read file /path/to/file.java -> ava\"}\n" +
-			"</system-reminder>"
-		assert.True(t, reverseMatchInlinedSRInner(flat, ver, "22b"))
+		assert.Equal(t, "first block", got[0])
+		assert.Equal(t, "second block", got[1])
 	})
 }
 
@@ -406,69 +361,6 @@ func TestFindCompactSummaryAnchorOffsets(t *testing.T) {
 		text := "中文前缀This session is being continued"
 		// "中文前缀" = 4 runes, anchor starts at rune index 4
 		assert.Equal(t, []int{4}, findCompactSummaryAnchorOffsets(text))
-	})
-}
-
-func TestReverseSuffixMatchAnyOffset(t *testing.T) {
-	t.Run("text too short returns false", func(t *testing.T) {
-		assert.False(t, reverseSuffixMatchAnyOffset("short", "2.1.150", "ffe"))
-	})
-
-	t.Run("matches at offset 0", func(t *testing.T) {
-		// "This session is being co..." → chars at [4,7,20] = ' ', 's', 'g'
-		// → " sg" + 2.1.150 → 22b
-		text := "This session is being continued from a previous conversation"
-		assert.True(t, reverseSuffixMatchAnyOffset(text, "2.1.150", "22b"))
-	})
-
-	t.Run("matches at non-zero offset (compact summary embedded inside)", func(t *testing.T) {
-		// 19:38 production reject pattern: compact summary text is embedded
-		// inside a larger tool-call/result blob. Window slides to the offset
-		// where "This session..." begins and matches " sg" chars there.
-		text := "Called Bash to do X.\n" +
-			"This session is being continued from a previous conversation\n" +
-			"Result: file ava\"}"
-		assert.True(t, reverseSuffixMatchAnyOffset(text, "2.1.150", "22b"))
-	})
-
-	t.Run("no match returns false even if text long", func(t *testing.T) {
-		text := strings.Repeat("xyz123abcXYZ", 20)
-		assert.False(t, reverseSuffixMatchAnyOffset(text, "2.1.150", "22b"))
-	})
-}
-
-func TestStringContentOfFirstUserMessage(t *testing.T) {
-	t.Run("string content", func(t *testing.T) {
-		body := map[string]any{
-			"messages": []any{
-				map[string]any{"role": "user", "content": "hello"},
-			},
-		}
-		s, ok := stringContentOfFirstUserMessage(body)
-		require.True(t, ok)
-		assert.Equal(t, "hello", s)
-	})
-
-	t.Run("array content - not string-form", func(t *testing.T) {
-		body := map[string]any{
-			"messages": []any{
-				map[string]any{"role": "user", "content": []any{
-					map[string]any{"type": "text", "text": "hi"},
-				}},
-			},
-		}
-		_, ok := stringContentOfFirstUserMessage(body)
-		assert.False(t, ok)
-	})
-
-	t.Run("nil body", func(t *testing.T) {
-		_, ok := stringContentOfFirstUserMessage(nil)
-		assert.False(t, ok)
-	})
-
-	t.Run("no messages", func(t *testing.T) {
-		_, ok := stringContentOfFirstUserMessage(map[string]any{})
-		assert.False(t, ok)
 	})
 }
 

@@ -905,32 +905,14 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 		return true
 	}
 
-	// Fallback for flattened string-form bodies: some middlewares concatenate
-	// the array-form turn into a single string with multiple
-	// <system-reminder>...</system-reminder> wrappers, and the SR containing
-	// the compact-summary block (the one the originating CLI keyed its
-	// suffix off) isn't the one our picker chose. Scan every embedded SR
-	// inner and accept if any of them algebraically reproduces parsedSuffix
-	// — this leans on the SHA256 derivation as an integrity proof: a forge
-	// without access to the original body cannot fabricate a matching inner
-	// without already knowing the algorithm. See `extractInlinedSystemReminderInners`
-	// for the candidate filter (minimum length guard).
-	if stringContent, ok := stringContentOfFirstUserMessage(body); ok &&
-		reverseMatchInlinedSRInner(stringContent, uaVersion, parsedSuffix) {
-		attrs := []any{
-			"step", "4.4_cc_version",
-			"ua", r.Header.Get("User-Agent"),
-			"ua_version", uaVersion,
-			"parsed_suffix", parsedSuffix,
-			"primary_expected_suffix", expected,
-			"first_user_text_runes", utf8.RuneCountInString(firstUserText),
-		}
-		attrs = append(attrs, requestIDAttrs(r)...)
-		slog.Info("claude_code_validator_reverse_matched_inner_sr", attrs...)
-		return true
-	}
-
 	// suffix mismatch — 是否拒绝取决于 strictCCVersionEnabled。
+	// 之前有一组 reverse-match fallback（reverseMatchInlinedSRInner + 滑窗）
+	// 试图救"中间层把 array 拍平成 string"的真用户，但 2026-05-25 的诊断数据
+	// (msg0_compact_anchors 全空) 证实那些 fallback 主要救活的是 forge replay
+	// ——伪造者复制真客户端的 cc_version 字符串发出，body 里其实没有匹配文字。
+	// 删除该 fallback 后，"算法对得上才放行、对不上一律拒绝"逻辑统一清晰；
+	// 真客户端如果 middleware 把 body 拍平到我们 stripInlinedSystemReminders
+	// 还原不出来的程度，按 mismatch 走下游 mimic 兜底（业务无影响）。
 	if !v.strictCCVersionEnabled(r.Context()) {
 		attrs := []any{
 			"step", "4.4_cc_version",
