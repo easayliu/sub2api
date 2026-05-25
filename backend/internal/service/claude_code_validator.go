@@ -932,7 +932,8 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 		"expected_suffix", expected,
 		"first_user_text_runes", utf8.RuneCountInString(firstUserText),
 		"msg0_blocks", describeMsg0ContentBlocks(body),
-		"msg0_compact_anchors", describeCompactAnchorsInMsg0(body))
+		"msg0_compact_anchors", describeCompactAnchorsInMsg0(body),
+		"msg0_suffix_candidates", describeMsg0SuffixCandidates(body, uaVersion, parsedSuffix))
 	return false
 }
 
@@ -1003,6 +1004,80 @@ func formatOffsets(offsets []int) string {
 		parts[i] = strconv.Itoa(o)
 	}
 	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// describeMsg0SuffixCandidates computes, for every text block in
+// messages[0].content that COULD be the sampled "first user text", the
+// cc_version suffix that block would produce, and marks the one matching
+// parsed_suffix with "<MATCH>". Used in suffix_mismatch reject logs to
+// pinpoint which block the real client actually keyed its suffix off of —
+// e.g. revealing that we sampled an <ide_selection> wrapper (VSCode-only,
+// absent from our CLI captures) while the client keyed off the trailing user
+// text. We have no packet capture for <ide_selection> handling, so rather
+// than guess whether to skip it, this field surfaces the evidence: when a
+// real VSCode request misses, the block tagged "<MATCH>" tells us which
+// block the client sampled.
+//
+// Selection mirrors pickBillingHeaderSampleText: <system-reminder> / <local-*
+// blocks are never the sample, so they show "skip" instead of a suffix (we
+// keep their index so the line aligns 1:1 with msg0_blocks). The block whose
+// candidate equals expected_suffix is the one we currently pick; the block
+// tagged "<MATCH>" is the one the client used — when they differ, the gap is
+// the sampling bug.
+//
+// Format (array form):
+//
+//	"blk[0]:skip | blk[1]:skip | blk[2]:438 | blk[3]:e09<MATCH>"
+//
+// String form shows the stripInlinedSystemReminders candidate as "string:<s>".
+// Returns "no_msg0" if messages[0] is not inspectable, "none" if no text.
+func describeMsg0SuffixCandidates(body map[string]any, version, parsedSuffix string) string {
+	if body == nil {
+		return "no_msg0"
+	}
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return "no_msg0"
+	}
+	m0, ok := msgs[0].(map[string]any)
+	if !ok {
+		return "no_msg0"
+	}
+
+	mark := func(text string) string {
+		s := computeBillingHeaderSuffixFromText(text, version)
+		if s == parsedSuffix {
+			return s + "<MATCH>"
+		}
+		return s
+	}
+
+	var parts []string
+	switch content := m0["content"].(type) {
+	case string:
+		parts = append(parts, "string:"+mark(stripInlinedSystemReminders(content)))
+	case []any:
+		for i, item := range content {
+			itemMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := itemMap["type"].(string); t != "text" {
+				continue
+			}
+			text, _ := itemMap["text"].(string)
+			label := "blk[" + strconv.Itoa(i) + "]:"
+			if billingHeaderSampleTextShouldSkip(text) {
+				parts = append(parts, label+"skip")
+				continue
+			}
+			parts = append(parts, label+mark(text))
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " | ")
 }
 
 // findBillingHeaderText 返回 body.system 中以 "x-anthropic-billing-header" 起首
