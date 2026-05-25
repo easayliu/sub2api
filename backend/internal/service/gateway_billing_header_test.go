@@ -373,6 +373,42 @@ func TestReverseMatchInlinedSRInner(t *testing.T) {
 	})
 }
 
+func TestFindCompactSummaryAnchorOffsets(t *testing.T) {
+	t.Run("empty text returns nil", func(t *testing.T) {
+		assert.Nil(t, findCompactSummaryAnchorOffsets(""))
+	})
+
+	t.Run("no anchor returns nil", func(t *testing.T) {
+		assert.Nil(t, findCompactSummaryAnchorOffsets("Called Bash with args"))
+	})
+
+	t.Run("single anchor at offset 0", func(t *testing.T) {
+		assert.Equal(t, []int{0},
+			findCompactSummaryAnchorOffsets("This session is being continued from a previous"))
+	})
+
+	t.Run("anchor at non-zero offset", func(t *testing.T) {
+		text := "Called X.\nThis session is being continued from a previous"
+		// "Called X.\n" = 10 runes, then anchor
+		assert.Equal(t, []int{10}, findCompactSummaryAnchorOffsets(text))
+	})
+
+	t.Run("multiple anchors", func(t *testing.T) {
+		text := "This session is being continued from foo. This session is being continued from bar."
+		// anchor 1 at 0, anchor 2 after "from foo. " = 42 (let it just check non-empty)
+		offsets := findCompactSummaryAnchorOffsets(text)
+		require.Len(t, offsets, 2)
+		assert.Equal(t, 0, offsets[0])
+		assert.Greater(t, offsets[1], 0)
+	})
+
+	t.Run("anchor with CJK preceding (rune offset, not byte)", func(t *testing.T) {
+		text := "中文前缀This session is being continued"
+		// "中文前缀" = 4 runes, anchor starts at rune index 4
+		assert.Equal(t, []int{4}, findCompactSummaryAnchorOffsets(text))
+	})
+}
+
 func TestReverseSuffixMatchAnyOffset(t *testing.T) {
 	t.Run("text too short returns false", func(t *testing.T) {
 		assert.False(t, reverseSuffixMatchAnyOffset("short", "2.1.150", "ffe"))

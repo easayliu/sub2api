@@ -198,6 +198,41 @@ func reverseMatchInlinedSRInner(text, version, parsedSuffix string) bool {
 	return false
 }
 
+// compactSummaryAnchorText is the deterministic prefix of the
+// post-/compact "first user text" block emitted by Claude Code CLI.
+// Finding its offset in a string-form inner is conclusive proof that the
+// flattened body contains a real compact-summary segment (or someone has
+// deliberately constructed one inside their fake body).
+const compactSummaryAnchorText = "This session is being continued"
+
+// findCompactSummaryAnchorOffsets returns every rune-offset within text
+// where compactSummaryAnchorText begins. Empty result means the body has
+// no compact-summary marker at all — strong signal that any parsed_suffix
+// matching the " sg" derivation is replayed/forged rather than computed
+// from this body.
+//
+// Iterates byte-level via strings.Index then converts byte offset to rune
+// offset, so multi-byte content (CJK / emoji before the anchor) is
+// reported in the rune-position the suffix algorithm actually samples on.
+func findCompactSummaryAnchorOffsets(text string) []int {
+	if text == "" {
+		return nil
+	}
+	var out []int
+	start := 0
+	for start < len(text) {
+		idx := strings.Index(text[start:], compactSummaryAnchorText)
+		if idx < 0 {
+			break
+		}
+		byteIdx := start + idx
+		runeIdx := utf8RuneCount(text[:byteIdx])
+		out = append(out, runeIdx)
+		start = byteIdx + len(compactSummaryAnchorText)
+	}
+	return out
+}
+
 // reverseSuffixMatchAnyOffset scans every rune offset i in text where
 // positions [i+4]/[i+7]/[i+20] are all in range, computing the
 // v2.1.77+ suffix from those chars and returning true on first match.

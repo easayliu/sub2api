@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -707,6 +708,76 @@ func boolStr(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+func TestDescribeCompactAnchorsInMsg0(t *testing.T) {
+	t.Run("nil body returns no_msg0", func(t *testing.T) {
+		assert.Equal(t, "no_msg0", describeCompactAnchorsInMsg0(nil))
+	})
+
+	t.Run("missing messages returns no_msg0", func(t *testing.T) {
+		assert.Equal(t, "no_msg0",
+			describeCompactAnchorsInMsg0(map[string]any{}))
+	})
+
+	t.Run("string content with anchor", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role":    "user",
+					"content": "Called X.\nThis session is being continued from a previous",
+				},
+			},
+		}
+		got := describeCompactAnchorsInMsg0(body)
+		assert.Equal(t, "string:[10]", got)
+	})
+
+	t.Run("string content without anchor", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "Called X with args"},
+			},
+		}
+		got := describeCompactAnchorsInMsg0(body)
+		assert.Equal(t, "string:[]", got)
+	})
+
+	t.Run("string content with SR inners", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": "<system-reminder>" +
+						strings.Repeat("X", 30) + "This session is being continued from prev" +
+						"</system-reminder>",
+				},
+			},
+		}
+		got := describeCompactAnchorsInMsg0(body)
+		// string-level anchor offset + inner[0] offset
+		require.Contains(t, got, "string:[")
+		require.Contains(t, got, "inner[0]:[")
+	})
+
+	t.Run("array content with per-block anchors", func(t *testing.T) {
+		body := map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder>foo</system-reminder>"},
+						map[string]any{"type": "text", "text": "This session is being continued from prev"},
+						map[string]any{"type": "text", "text": "user input"},
+					},
+				},
+			},
+		}
+		got := describeCompactAnchorsInMsg0(body)
+		require.Contains(t, got, "blk[0]:[]")
+		require.Contains(t, got, "blk[1]:[0]")
+		require.Contains(t, got, "blk[2]:[]")
+	})
 }
 
 func TestExtractFirstUserMessageTextFromMap(t *testing.T) {

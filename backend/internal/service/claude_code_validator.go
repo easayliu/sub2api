@@ -949,8 +949,78 @@ func (v *ClaudeCodeValidator) validateBillingHeaderSuffix(r *http.Request, body 
 		"parsed_suffix", parsedSuffix,
 		"expected_suffix", expected,
 		"first_user_text_runes", utf8.RuneCountInString(firstUserText),
-		"msg0_blocks", describeMsg0ContentBlocks(body))
+		"msg0_blocks", describeMsg0ContentBlocks(body),
+		"msg0_compact_anchors", describeCompactAnchorsInMsg0(body))
 	return false
+}
+
+// describeCompactAnchorsInMsg0 returns a compact diagnostic string listing
+// every offset within messages[0] candidate texts where the compact-
+// summary anchor ("This session is being continued") appears. Used in
+// suffix_mismatch reject logs so we can definitively tell apart:
+//
+//   - Real flattened middleware traffic: anchor present → sliding window
+//     should have matched; if it did not, the anchor offset reveals the
+//     sampling mismatch.
+//   - Forge replay: anchor absent → no body content backs the claimed
+//     parsed_suffix; the value was lifted from a captured session.
+//
+// Format: "string:<list> | inner[0]:<list> | inner[1]:<list> | ..."
+// where <list> is comma-separated rune offsets, or empty when not found.
+// Returns "no_msg0" if messages[0] is not inspectable.
+func describeCompactAnchorsInMsg0(body map[string]any) string {
+	if body == nil {
+		return "no_msg0"
+	}
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return "no_msg0"
+	}
+	m0, ok := msgs[0].(map[string]any)
+	if !ok {
+		return "no_msg0"
+	}
+
+	var parts []string
+	switch content := m0["content"].(type) {
+	case string:
+		parts = append(parts, "string:"+formatOffsets(findCompactSummaryAnchorOffsets(content)))
+		// Also scan every <system-reminder>...</system-reminder> inner so we
+		// can see whether the anchor sits inside a specific SR wrapper.
+		inners := extractInlinedSystemReminderInners(content)
+		for i, inner := range inners {
+			parts = append(parts, "inner["+strconv.Itoa(i)+"]:"+formatOffsets(findCompactSummaryAnchorOffsets(inner)))
+		}
+	case []any:
+		for i, item := range content {
+			itemMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := itemMap["type"].(string); t != "text" {
+				continue
+			}
+			text, _ := itemMap["text"].(string)
+			parts = append(parts, "blk["+strconv.Itoa(i)+"]:"+formatOffsets(findCompactSummaryAnchorOffsets(text)))
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " | ")
+}
+
+// formatOffsets renders a list of rune offsets as a comma-separated string
+// suitable for inclusion in a single log field. Empty list → "[]".
+func formatOffsets(offsets []int) string {
+	if len(offsets) == 0 {
+		return "[]"
+	}
+	parts := make([]string, len(offsets))
+	for i, o := range offsets {
+		parts[i] = strconv.Itoa(o)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // findBillingHeaderText 返回 body.system 中以 "x-anthropic-billing-header" 起首
