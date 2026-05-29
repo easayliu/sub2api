@@ -498,7 +498,9 @@ func TestIsAllowedClaudeCLIUAFamily(t *testing.T) {
 		"claude-cli/2.1.145 (external, claude-vscode)",                    // VSCode 截断形态
 		"claude-cli/2.1.145 (external, claude-vscode, agent-sdk/0.3.145)", // VSCode + agent-sdk
 		"claude-cli/2.1.144 (external, claude-vscode, agent-sdk/0.3.144)",
-		"Claude-CLI/2.1.144 (External, Claude-VSCode, Agent-SDK/0.3.144)", // case insensitive
+		"Claude-CLI/2.1.144 (External, Claude-VSCode, Agent-SDK/0.3.144)",     // case insensitive
+		"claude-cli/2.1.156 (external, claude-desktop-3p, agent-sdk/0.3.156)", // Desktop 3p（抓包验证）
+		"claude-cli/2.1.142 (external, claude-desktop-3p)",                    // Desktop 3p 截断形态
 	}
 	for _, ua := range allowed {
 		require.True(t, isAllowedClaudeCLIUAFamily(ua), "should allow: %q", ua)
@@ -507,13 +509,12 @@ func TestIsAllowedClaudeCLIUAFamily(t *testing.T) {
 	denied := []string{
 		"",
 		"claude-cli/2.1.146", // no parenthesized suffix
-		"claude-cli/2.1.128 (external, local-agent)",                          // illegitimate
-		"claude-cli/2.1.142 (external, claude-desktop-3p, agent-sdk/0.3.142)", // Desktop 3p
-		"claude-cli/2.1.146 (darwin; arm64)",                                  // pre-2.1.77 style
-		"claude-cli/2.1.146 (external, cli, extra-token)",                     // extra tokens not allowed
-		"claude-cli/2.1.146 (external, sdkcli)",                               // typo / forged
-		"claude-cli/2.1.146 (external, claude-vscode-fake)",                   // forged claude-vscode-like prefix
-		"claude-cli/2.1.146 (external, claude-vscode, junk-suffix)",           // claude-vscode followed by non-agent-sdk token
+		"claude-cli/2.1.128 (external, local-agent)",                // illegitimate
+		"claude-cli/2.1.146 (darwin; arm64)",                        // pre-2.1.77 style
+		"claude-cli/2.1.146 (external, cli, extra-token)",           // extra tokens not allowed
+		"claude-cli/2.1.146 (external, sdkcli)",                     // typo / forged
+		"claude-cli/2.1.146 (external, claude-vscode-fake)",         // forged claude-vscode-like prefix
+		"claude-cli/2.1.146 (external, claude-vscode, junk-suffix)", // claude-vscode followed by non-agent-sdk token
 		"curl/8.0.0",
 	}
 	for _, ua := range denied {
@@ -528,10 +529,10 @@ func TestClaudeCodeValidator_ValidateUserAgent_EnforcesFamily(t *testing.T) {
 	require.True(t, v.ValidateUserAgent("claude-cli/2.1.109 (external, sdk-cli)"))
 	require.True(t, v.ValidateUserAgent("claude-cli/2.1.145 (external, claude-vscode)"))
 	require.True(t, v.ValidateUserAgent("claude-cli/2.1.145 (external, claude-vscode, agent-sdk/0.3.145)"))
+	require.True(t, v.ValidateUserAgent("claude-cli/2.1.156 (external, claude-desktop-3p, agent-sdk/0.3.156)"))
 	// Prefix-only is no longer enough — family must also match.
 	require.False(t, v.ValidateUserAgent("claude-cli/2.1.146"))
 	require.False(t, v.ValidateUserAgent("claude-cli/2.1.128 (external, local-agent)"))
-	require.False(t, v.ValidateUserAgent("claude-cli/2.1.142 (external, claude-desktop-3p, agent-sdk/0.3.142)"))
 }
 
 func TestClaudeCodeValidator_Validate_RejectsNonAllowedFamily(t *testing.T) {

@@ -99,17 +99,18 @@ var (
 	//   - (external, sdk-cli)                             — SDK（抓包验证）
 	//   - (external, claude-vscode)                       — VSCode 扩展（截断形态）
 	//   - (external, claude-vscode, agent-sdk/X.Y.Z)      — VSCode 扩展完整形态
+	//   - (external, claude-desktop-3p)                   — Desktop 第三方接入（截断形态）
+	//   - (external, claude-desktop-3p, agent-sdk/X.Y.Z)  — Desktop 第三方接入完整形态（抓包验证）
 	//
 	// 拒绝的家族（已观察到但定性为伪造）：
 	//   - (external, local-agent)
-	//   - (external, claude-desktop-3p, ...)
 	//   - 其他未在白名单的 external 衍生
 	//
-	// 注意 claude-vscode 后面的 agent-sdk/X.Y.Z 部分匹配 [^)]+，对子版本号宽松；
-	// 但只允许 claude-vscode 之后跟随 agent-sdk/，避免给"claude-vscode-fake"
-	// 这种伪造类似 UA 后缀绕过。
+	// 注意 claude-vscode / claude-desktop-3p 后面的 agent-sdk/X.Y.Z 部分匹配 [^)]+，
+	// 对子版本号宽松；但只允许这两个家族之后跟随 agent-sdk/，避免给
+	// "claude-vscode-fake" 这种伪造类似 UA 后缀绕过。
 	allowedClaudeCLIUAFamilyPattern = regexp.MustCompile(
-		`(?i)\(external,\s*(cli|sdk-cli|claude-vscode(?:,\s*agent-sdk/[^)]+)?)\)\s*$`,
+		`(?i)\(external,\s*(cli|sdk-cli|(?:claude-vscode|claude-desktop-3p)(?:,\s*agent-sdk/[^)]+)?)\)\s*$`,
 	)
 
 	// System prompt 相似度阈值（默认 0.5，和 claude-relay-service 一致）
@@ -302,8 +303,8 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 
 	// Step 1.5: UA 后缀家族白名单。
 	// 即便 UA 前缀是 claude-cli/X.Y.Z，括号里的家族后缀也必须是已抓包验证的
-	// (external, cli) 或 (external, sdk-cli)。其他家族（local-agent /
-	// claude-vscode / agent-sdk/... 等）一律拒。
+	// (external, cli) / (external, sdk-cli) / (external, claude-vscode[, agent-sdk/...]) /
+	// (external, claude-desktop-3p[, agent-sdk/...])。其他家族（local-agent 等）一律拒。
 	if !isAllowedClaudeCLIUAFamily(ua) {
 		logRejected(r, "1.5_ua_family", "not_allowed_family", "ua", ua)
 		return false
@@ -1278,8 +1279,9 @@ func (v *ClaudeCodeValidator) ValidateUserAgent(ua string) bool {
 }
 
 // isAllowedClaudeCLIUAFamily 检查 UA 的括号家族后缀是否在白名单内。
-// 真实合法家族（有抓包证据的）：(external, cli) / (external, sdk-cli)。
-// 其它（local-agent / claude-vscode / agent-sdk/X.Y.Z 等）一律拒。
+// 真实合法家族（有抓包证据的）：(external, cli) / (external, sdk-cli) /
+// (external, claude-vscode[, agent-sdk/...]) / (external, claude-desktop-3p[, agent-sdk/...])。
+// 其它（local-agent 等）一律拒。
 func isAllowedClaudeCLIUAFamily(ua string) bool {
 	return allowedClaudeCLIUAFamilyPattern.MatchString(ua)
 }
