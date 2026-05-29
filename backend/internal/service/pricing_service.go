@@ -658,6 +658,7 @@ func (s *PricingService) extractBaseName(model string) string {
 func (s *PricingService) matchByModelFamily(model string) *LiteLLMModelPricing {
 	// Claude模型系列匹配规则
 	familyPatterns := map[string][]string{
+		"opus-4.8":   {"claude-opus-4.8", "claude-opus-4-8"},
 		"opus-4.7":   {"claude-opus-4.7", "claude-opus-4-7"},
 		"opus-4.6":   {"claude-opus-4.6", "claude-opus-4-6"},
 		"opus-4.5":   {"claude-opus-4.5", "claude-opus-4-5"},
@@ -687,7 +688,9 @@ func (s *PricingService) matchByModelFamily(model string) *LiteLLMModelPricing {
 	if matchedFamily == "" {
 		// 简单的系列匹配
 		if strings.Contains(model, "opus") {
-			if strings.Contains(model, "4.7") || strings.Contains(model, "4-7") {
+			if strings.Contains(model, "4.8") || strings.Contains(model, "4-8") {
+				matchedFamily = "opus-4.8"
+			} else if strings.Contains(model, "4.7") || strings.Contains(model, "4-7") {
 				matchedFamily = "opus-4.7"
 			} else if strings.Contains(model, "4.6") || strings.Contains(model, "4-6") {
 				matchedFamily = "opus-4.6"
