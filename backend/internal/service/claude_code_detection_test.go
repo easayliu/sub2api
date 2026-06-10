@@ -20,7 +20,7 @@ func newTestValidator() *ClaudeCodeValidator {
 // setValidCLIHeaders 写入一组真实 Claude CLI 抓包里观察到的合法 header，
 // 给所有 messages 正向测试复用，避免重复罗列每个 header。
 func setValidCLIHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", "claude-cli/1.0.0")
+	req.Header.Set("User-Agent", "claude-cli/1.0.0 (external, cli)")
 	req.Header.Set("X-App", "cli")
 	req.Header.Set("anthropic-beta", "claude-code-20250219")
 	req.Header.Set("anthropic-version", "2023-06-01")
@@ -54,14 +54,21 @@ func TestValidate_ClaudeCLIUserAgent(t *testing.T) {
 		ua   string
 		want bool
 	}{
-		{"标准版本号", "claude-cli/1.0.0", true},
-		{"多位版本号", "claude-cli/12.34.56", true},
-		{"大写开头", "Claude-CLI/1.0.0", true},
+		{"标准 cli 家族", "claude-cli/1.0.0 (external, cli)", true},
+		{"多位版本号", "claude-cli/12.34.56 (external, cli)", true},
+		{"大写开头", "Claude-CLI/1.0.0 (external, cli)", true},
+		{"sdk-cli 家族", "claude-cli/1.0.0 (external, sdk-cli)", true},
+		{"claude-vscode 家族", "claude-cli/1.0.0 (external, claude-vscode)", true},
+		{"claude-vscode 带 agent-sdk", "claude-cli/1.0.0 (external, claude-vscode, agent-sdk/0.1.10)", true},
+		{"claude-desktop-3p 家族", "claude-cli/1.0.0 (external, claude-desktop-3p)", true},
+		{"无家族后缀", "claude-cli/1.0.0", false},
+		{"local-agent 家族", "claude-cli/1.0.0 (external, local-agent)", false},
+		{"伪造 vscode 衍生家族", "claude-cli/1.0.0 (external, claude-vscode-fake)", false},
 		{"非 claude-cli", "curl/7.64.1", false},
 		{"空 User-Agent", "", false},
-		{"部分匹配", "not-claude-cli/1.0.0", false},
-		{"缺少版本号", "claude-cli/", false},
-		{"版本格式不对", "claude-cli/1.0", false},
+		{"部分匹配", "not-claude-cli/1.0.0 (external, cli)", false},
+		{"缺少版本号", "claude-cli/ (external, cli)", false},
+		{"版本格式不对", "claude-cli/1.0 (external, cli)", false},
 	}
 
 	for _, tt := range tests {
@@ -76,7 +83,7 @@ func TestValidate_NonMessagesPath_UAOnly(t *testing.T) {
 
 	// 非 messages 路径只检查 UA
 	req := httptest.NewRequest("GET", "/v1/models", nil)
-	req.Header.Set("User-Agent", "claude-cli/1.0.0")
+	req.Header.Set("User-Agent", "claude-cli/1.0.0 (external, cli)")
 
 	result := v.Validate(req, nil)
 	require.True(t, result, "非 messages 路径只需 UA 匹配")
@@ -252,7 +259,7 @@ func TestValidate_BillingHeaderSuffix(t *testing.T) {
 	mkReq := func(uaVersion string) *http.Request {
 		req := httptest.NewRequest("POST", "/v1/messages", nil)
 		setValidCLIHeaders(req)
-		req.Header.Set("User-Agent", "claude-cli/"+uaVersion)
+		req.Header.Set("User-Agent", "claude-cli/"+uaVersion+" (external, cli)")
 		return req
 	}
 
@@ -555,7 +562,7 @@ func TestValidate_MaxTokensOneHaikuBypass(t *testing.T) {
 	v := newTestValidator()
 
 	req := httptest.NewRequest("POST", "/v1/messages", nil)
-	req.Header.Set("User-Agent", "claude-cli/1.0.0")
+	req.Header.Set("User-Agent", "claude-cli/1.0.0 (external, cli)")
 	// 不设置 X-App 等头，通过 context 标记为 haiku 探测请求
 	ctx := context.WithValue(req.Context(), ctxkey.IsMaxTokensOneHaikuRequest, true)
 	req = req.WithContext(ctx)

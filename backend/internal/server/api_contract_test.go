@@ -582,6 +582,7 @@ func TestAPIContracts(t *testing.T) {
 						"table_page_size_options": [10, 20, 50, 100],
 					"min_claude_code_version": "",
 					"max_claude_code_version": "",
+					"enable_strict_cc_version": true,
 					"allow_ungrouped_key_scheduling": false,
 					"backend_mode_enabled": false,
 					"enable_cch_signing": false,
