@@ -775,8 +775,9 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			require.Equal(t, claudeCodeSystemPrompt, blocks[1].Get("text").String())
 			require.False(t, blocks[1].Get("cache_control").Exists())
 
-			// system[2]: 客户端原始 system 文本 (带 cache_control + scope=global)
-			require.Contains(t, blocks[2].Get("text").String(), "x-anthropic-billing-header keep")
+			// system[2]: 恒为完整 CC agent 指令 (带 cache_control + scope=global)
+			require.Equal(t, defaultClaudeCodeAgentPrompt, blocks[2].Get("text").String(),
+				"system[2] 恒为真实 CC agent 指令；客户端 system 改由 messages 迁移承载")
 			require.Equal(t, "ephemeral", blocks[2].Get("cache_control.type").String())
 			require.Equal(t, "1h", blocks[2].Get("cache_control.ttl").String())
 			require.Equal(t, "global", blocks[2].Get("cache_control.scope").String())
@@ -786,17 +787,19 @@ func TestGatewayService_AnthropicOAuth_ForwardPreservesBillingHeaderSystemBlock(
 			require.Equal(t, "ephemeral", blocks[3].Get("cache_control.type").String())
 			require.Equal(t, "1h", blocks[3].Get("cache_control.ttl").String())
 
-			// messages: original user turn preserved as the LAST text block of content,
-			// preceded by the currentDate <system-reminder> block prepended by mimic.
+			// messages: 客户端原始 system 迁移到首条 user 消息最前面的 <system-reminder>，
+			// 其后是 mimic 注入的 currentDate reminder，最后才是原始 user 文本。
 			messages := gjson.GetBytes(upstream.lastBody, "messages")
 			require.True(t, messages.IsArray())
 			require.Len(t, messages.Array(), 1)
 			content := messages.Array()[0].Get("content").Array()
-			require.Len(t, content, 2,
-				"first user message gets currentDate reminder prepended ahead of user text")
+			require.Len(t, content, 3,
+				"首条 user 消息依次为：迁移的客户端 system、currentDate reminder、原始 user 文本")
 			require.Contains(t, content[0].Get("text").String(), "<system-reminder>")
-			require.Contains(t, content[0].Get("text").String(), "# currentDate")
-			require.Equal(t, "hello", content[1].Get("text").String())
+			require.Contains(t, content[0].Get("text").String(), "x-anthropic-billing-header keep",
+				"客户端原始 system 文本应迁移到首条 user 消息，而非丢弃")
+			require.Contains(t, content[1].Get("text").String(), "# currentDate")
+			require.Equal(t, "hello", content[2].Get("text").String())
 		})
 	}
 }

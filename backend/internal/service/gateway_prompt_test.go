@@ -287,35 +287,31 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 	const billingHeaderText = "x-anthropic-billing-header: cc_version=2.1.123.d8c; cc_entrypoint=cli; cch=00000;"
 
 	tests := []struct {
-		name              string
-		body              string
-		system            any
-		wantBlock2Text    string // system[2].text 期望值；空表示用默认 CC agent prompt
-		wantBlock2Default bool   // system[2] 是否应等于 defaultClaudeCodeAgentPrompt
+		name         string
+		body         string
+		system       any
+		wantMigrated string // 期望迁移到 messages 的客户端 system 文本（空=无迁移）
 	}{
 		{
-			name:              "nil system - block2 falls back to default agent prompt",
-			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:            nil,
-			wantBlock2Default: true,
+			name:   "nil system - block2 falls back to default agent prompt",
+			body:   `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system: nil,
 		},
 		{
-			name:              "empty string system - block2 falls back to default",
-			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:            "",
-			wantBlock2Default: true,
+			name:   "empty string system - block2 falls back to default",
+			body:   `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system: "",
 		},
 		{
-			name:           "custom string system - kept in system[2]",
-			body:           `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:         "You are a personal assistant running inside OpenClaw.",
-			wantBlock2Text: "You are a personal assistant running inside OpenClaw.",
+			name:         "custom string system - migrated to messages",
+			body:         `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system:       "You are a personal assistant running inside OpenClaw.",
+			wantMigrated: "You are a personal assistant running inside OpenClaw.",
 		},
 		{
-			name:              "system equals Claude Code banner - block2 falls back to default",
-			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:            claudeCodeSystemPrompt,
-			wantBlock2Default: true,
+			name:   "system equals Claude Code banner - block2 falls back to default",
+			body:   `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system: claudeCodeSystemPrompt,
 		},
 		{
 			name: "array system with custom blocks - joined into system[2]",
@@ -324,31 +320,31 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 				map[string]any{"type": "text", "text": "First instruction"},
 				map[string]any{"type": "text", "text": "Second instruction"},
 			},
-			wantBlock2Text: "First instruction\n\nSecond instruction",
+			wantMigrated: "First instruction\n\nSecond instruction",
 		},
 		{
-			name:              "empty array system - block2 falls back to default",
-			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:            []any{},
-			wantBlock2Default: true,
+			name:   "empty array system - block2 falls back to default",
+			body:   `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system: []any{},
 		},
 		{
-			name:           "json.RawMessage string system",
-			body:           `{"model":"claude-3","system":"Custom prompt","messages":[{"role":"user","content":"hello"}]}`,
-			system:         json.RawMessage(`"Custom prompt"`),
-			wantBlock2Text: "Custom prompt",
+			name:         "json.RawMessage string system",
+			body:         `{"model":"claude-3","system":"Custom prompt","messages":[{"role":"user","content":"hello"}]}`,
+			system:       json.RawMessage(`"Custom prompt"`),
+			wantMigrated: "Custom prompt",
 		},
 		{
-			name:              "json.RawMessage nil system - block2 falls back to default",
-			body:              `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
-			system:            json.RawMessage(nil),
-			wantBlock2Default: true,
+			name:   "json.RawMessage nil system - block2 falls back to default",
+			body:   `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
+			system: json.RawMessage(nil),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := rewriteSystemForNonClaudeCode([]byte(tt.body), tt.system)
+			result, migrated := rewriteSystemForNonClaudeCode([]byte(tt.body), tt.system, gjson.GetBytes([]byte(tt.body), "model").String())
+			require.Equal(t, tt.wantMigrated, migrated,
+				"客户端自带 system 应原样作为迁移文本返回（空/banner 时为空）")
 
 			var parsed map[string]any
 			err := json.Unmarshal(result, &parsed)
@@ -374,11 +370,8 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			block2, ok := systemArr[2].(map[string]any)
 			require.True(t, ok, "system[2] should be an object, got %T", systemArr[2])
 			require.Equal(t, "text", block2["type"])
-			if tt.wantBlock2Default {
-				require.Equal(t, defaultClaudeCodeAgentPrompt, block2["text"])
-			} else {
-				require.Equal(t, tt.wantBlock2Text, block2["text"])
-			}
+			require.Equal(t, defaultClaudeCodeAgentPrompt, block2["text"],
+				"system[2] 恒为完整 CC agent prompt；客户端 system 改由 messages 迁移承载")
 			cc, ok := block2["cache_control"].(map[string]any)
 			require.True(t, ok, "system[2] should have cache_control")
 			require.Equal(t, "ephemeral", cc["type"])
@@ -410,6 +403,112 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			require.Len(t, messages, len(originalMessages), "messages must not be mutated")
 		})
 	}
+}
+
+func TestRenderClaudeCodeEnvPrompt(t *testing.T) {
+	tests := []struct {
+		name     string
+		modelID  string
+		wantLine string // 期望出现的模型标识行；空表示应保持模板原样
+		wantSame bool   // 是否应与 defaultClaudeCodeEnvPrompt 完全一致
+	}{
+		{
+			name:     "opus-4-8 follows request",
+			modelID:  "claude-opus-4-8",
+			wantLine: " - You are powered by the model named Opus 4.8. The exact model ID is claude-opus-4-8.",
+		},
+		{
+			name:     "fable-5 follows request",
+			modelID:  "claude-fable-5",
+			wantLine: " - You are powered by the model named Fable 5. The exact model ID is claude-fable-5.",
+		},
+		{
+			name:     "fable-5 1m variant keeps 1M markers",
+			modelID:  "claude-fable-5[1m]",
+			wantLine: " - You are powered by the model named Fable 5 (with 1M context). The exact model ID is claude-fable-5[1m].",
+		},
+		{
+			name:     "short sonnet id normalizes to dated id",
+			modelID:  "claude-sonnet-4-5",
+			wantLine: " - You are powered by the model named Sonnet 4.5. The exact model ID is claude-sonnet-4-5-20250929.",
+		},
+		{
+			name:     "unknown model keeps template",
+			modelID:  "gpt-4o",
+			wantSame: true,
+		},
+		{
+			name:     "empty model keeps template",
+			modelID:  "",
+			wantSame: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := renderClaudeCodeEnvPrompt(tt.modelID)
+			if tt.wantSame {
+				require.Equal(t, defaultClaudeCodeEnvPrompt, out)
+				return
+			}
+			require.Contains(t, out, tt.wantLine, "模型标识行应随请求模型渲染")
+			require.NotContains(t, out, "claude-opus-4-6[1m]", "不应残留写死的 Opus 4.6 模型 ID")
+			require.Equal(t, 1, strings.Count(out, "The exact model ID is"),
+				"模型标识行只应出现一次，避免重复注入")
+		})
+	}
+}
+
+func TestMigrateAgentSystemToMessages(t *testing.T) {
+	const agentSystem = "You are a personal assistant running inside OpenClaw."
+
+	t.Run("empty agentSystem is a no-op", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+		out := migrateAgentSystemToMessages(body, "")
+		require.JSONEq(t, string(body), string(out))
+	})
+
+	t.Run("array content: reminder prepended, original content preserved after", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+		out := migrateAgentSystemToMessages(body, agentSystem)
+
+		content := gjson.GetBytes(out, "messages.0.content")
+		require.True(t, content.IsArray())
+		arr := content.Array()
+		require.Len(t, arr, 2, "迁移块插入到 content[0]，原内容顺延")
+		require.Equal(t, "text", arr[0].Get("type").String())
+		require.Contains(t, arr[0].Get("text").String(), "<system-reminder>")
+		require.Contains(t, arr[0].Get("text").String(), agentSystem)
+		require.Equal(t, "hi", arr[1].Get("text").String(), "原 user 文本保持不变且在迁移块之后")
+	})
+
+	t.Run("string content: wrapped into array with reminder first", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+		out := migrateAgentSystemToMessages(body, agentSystem)
+
+		content := gjson.GetBytes(out, "messages.0.content")
+		require.True(t, content.IsArray())
+		arr := content.Array()
+		require.Len(t, arr, 2)
+		require.Contains(t, arr[0].Get("text").String(), agentSystem)
+		require.Equal(t, "hi", arr[1].Get("text").String())
+	})
+
+	t.Run("injects at first user message, leaves assistant turns untouched", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"text","text":"prior"}]},{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+		out := migrateAgentSystemToMessages(body, agentSystem)
+
+		require.Equal(t, "prior", gjson.GetBytes(out, "messages.0.content.0.text").String(), "assistant 轮不应被改动")
+		first := gjson.GetBytes(out, "messages.1.content")
+		require.True(t, first.IsArray())
+		require.Contains(t, first.Array()[0].Get("text").String(), agentSystem)
+	})
+
+	t.Run("no user message is a no-op", func(t *testing.T) {
+		body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"text","text":"x"}]}]}`)
+		out := migrateAgentSystemToMessages(body, agentSystem)
+		require.JSONEq(t, string(body), string(out))
+	})
 }
 
 func TestMimicCLIBodyFields(t *testing.T) {
