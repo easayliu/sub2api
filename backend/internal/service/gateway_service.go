@@ -4981,6 +4981,15 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// Pre-filter: strip empty text blocks (including nested in tool_result) to prevent upstream 400.
 	body = StripEmptyTextBlocks(body)
 
+	// 工具名混淆：仅 OAuth 伪装路径。把非 CLI 客户端的任意工具名替换成 Claude-Code 风格
+	// 假名转发，避免被上游判为第三方应用而返回 extra-usage 400；响应侧按 mapping 还原。
+	if shouldMimicClaudeCode {
+		if rw := buildToolNameRewriteFromBody(body); rw != nil {
+			body = applyToolNameRewriteToBody(body, rw)
+			c.Set(toolNameRewriteKey, rw)
+		}
+	}
+
 	// 重试间复用同一请求体，避免每次 string(body) 产生额外分配。
 	setOpsUpstreamRequestBody(c, body)
 
@@ -7731,6 +7740,8 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	}
 
 	needModelReplace := originalModel != mappedModel
+	// 工具名还原映射：仅 OAuth 伪装路径在请求侧写入；nil 表示无需还原（零开销透传）。
+	toolRewrite := toolNameRewriteFromContext(c)
 	clientDisconnected := false // 客户端断开标志，断开后继续读取上游以获取完整usage
 	sawTerminalEvent := false
 
@@ -7910,6 +7921,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				}
 
 				for _, block := range outputBlocks {
+					if toolRewrite != nil {
+						block = restoreToolNames(block, toolRewrite)
+					}
 					if !clientDisconnected {
 						if _, werr := fmt.Fprint(w, block); werr != nil {
 							clientDisconnected = true
@@ -8253,6 +8267,11 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 	// 如果有模型映射，替换响应中的model字段
 	if originalModel != mappedModel {
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+	}
+
+	// 工具名还原：把请求侧混淆的假名换回真名（仅 OAuth 伪装路径有 mapping，否则原样）。
+	if rw := toolNameRewriteFromContext(c); rw != nil {
+		body = []byte(restoreToolNames(string(body), rw))
 	}
 
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -9147,6 +9166,10 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	if shouldMimicClaudeCode {
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: true}
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
+		// 工具名混淆：count_tokens 带多工具同样会被判第三方；响应仅含 token 数无需还原。
+		if rw := buildToolNameRewriteFromBody(body); rw != nil {
+			body = applyToolNameRewriteToBody(body, rw)
+		}
 	}
 
 	// Antigravity 账户不支持 count_tokens，返回 404 让客户端 fallback 到本地估算。
