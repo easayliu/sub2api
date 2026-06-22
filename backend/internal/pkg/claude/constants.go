@@ -89,10 +89,13 @@ const APIKeyHaikuBetaHeader = BetaInterleavedThinking
 var DefaultHeaders = map[string]string{
 	// Keep these in sync with recent Claude CLI traffic to reduce the chance
 	// that Claude Code-scoped OAuth credentials are rejected as "non-CLI" usage.
-	// Reference: capture/0508/003_100543_..._v1_messages?beta=true.json (CLI 2.1.133).
-	"User-Agent":                                "claude-cli/2.1.133 (external, cli)",
+	// Reference: capture/2.1.185/005 (OAuth) & 012 (api-key) — both emit
+	// claude-cli/2.1.185 with X-Stainless-Package-Version 0.94.0; the rest of the
+	// Stainless tuple (OS/Arch/Runtime v24.3.0/Retry-Count/Timeout) is unchanged
+	// from 2.1.133.
+	"User-Agent":                                "claude-cli/2.1.185 (external, cli)",
 	"X-Stainless-Lang":                          "js",
-	"X-Stainless-Package-Version":               "0.81.0",
+	"X-Stainless-Package-Version":               "0.94.0",
 	"X-Stainless-OS":                            "MacOS",
 	"X-Stainless-Arch":                          "arm64",
 	"X-Stainless-Runtime":                       "node",

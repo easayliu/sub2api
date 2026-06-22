@@ -102,9 +102,9 @@ const (
 // Mac-shaped rewrite.
 var platformProfiles = map[string]Fingerprint{
 	PlatformMacOS: {
-		UserAgent:               "claude-cli/2.1.133 (external, cli)",
+		UserAgent:               "claude-cli/2.1.185 (external, cli)",
 		StainlessLang:           "js",
-		StainlessPackageVersion: "0.81.0",
+		StainlessPackageVersion: "0.94.0",
 		StainlessOS:             PlatformMacOS,
 		StainlessArch:           "arm64",
 		StainlessRuntime:        "node",
@@ -116,9 +116,9 @@ var platformProfiles = map[string]Fingerprint{
 		PromptShell:             "zsh",
 	},
 	PlatformWindows: {
-		UserAgent:               "claude-cli/2.1.133 (external, cli)",
+		UserAgent:               "claude-cli/2.1.185 (external, cli)",
 		StainlessLang:           "js",
-		StainlessPackageVersion: "0.81.0",
+		StainlessPackageVersion: "0.94.0",
 		StainlessOS:             PlatformWindows,
 		StainlessArch:           "x64",
 		StainlessRuntime:        "node",
@@ -130,9 +130,9 @@ var platformProfiles = map[string]Fingerprint{
 		PromptShell:             "PowerShell (use PowerShell syntax — e.g., $null not /dev/null, $env:VAR not $VAR, backtick for line continuation)",
 	},
 	PlatformLinux: {
-		UserAgent:               "claude-cli/2.1.133 (external, cli)",
+		UserAgent:               "claude-cli/2.1.185 (external, cli)",
 		StainlessLang:           "js",
-		StainlessPackageVersion: "0.81.0",
+		StainlessPackageVersion: "0.94.0",
 		StainlessOS:             PlatformLinux,
 		StainlessArch:           "x64",
 		StainlessRuntime:        "node",

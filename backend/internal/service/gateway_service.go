@@ -4274,8 +4274,9 @@ func renderClaudeCodeEnvPrompt(modelID string) string {
 }
 
 // claudeCodeEnvModelLine 按 modelID 构造 env 的模型标识行，对齐 CLI 措辞：
-// 名称形如「<短名>[ (with 1M context)]」，exact model ID 仅在 1M 变体时带「[1m]」后缀。
-// modelID 非已知 Claude 模型时返回 ""，由调用方回退到模板。
+// 名称形如「<短名>[ (1M context)]」，exact model ID 仅在 1M 变体时带「[1m]」后缀。
+// 1M 后缀措辞与真实抓包一致（2.1.123 Opus 4.7 / 2.1.185 Opus 4.8 均为 "(1M context)"，
+// 无 "with"）。modelID 非已知 Claude 模型时返回 ""，由调用方回退到模板。
 func claudeCodeEnvModelLine(modelID string) string {
 	modelID = strings.TrimSpace(modelID)
 	is1M := strings.HasSuffix(modelID, "[1m]")
@@ -4288,7 +4289,7 @@ func claudeCodeEnvModelLine(modelID string) string {
 
 	ctxSuffix, idSuffix := "", ""
 	if is1M {
-		ctxSuffix = " (with 1M context)"
+		ctxSuffix = " (1M context)"
 		idSuffix = "[1m]"
 	}
 	return fmt.Sprintf(" - You are powered by the model named %s%s. The exact model ID is %s%s.", shortName, ctxSuffix, base, idSuffix)

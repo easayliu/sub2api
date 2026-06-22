@@ -425,7 +425,7 @@ func TestRenderClaudeCodeEnvPrompt(t *testing.T) {
 		{
 			name:     "fable-5 1m variant keeps 1M markers",
 			modelID:  "claude-fable-5[1m]",
-			wantLine: " - You are powered by the model named Fable 5 (with 1M context). The exact model ID is claude-fable-5[1m].",
+			wantLine: " - You are powered by the model named Fable 5 (1M context). The exact model ID is claude-fable-5[1m].",
 		},
 		{
 			name:     "short sonnet id normalizes to dated id",

@@ -22,7 +22,7 @@ You have been invoked in the following environment:
  - Platform: darwin
  - Shell: zsh
  - OS Version: Darwin 25.3.0
- - You are powered by the model named Opus 4.6 (with 1M context). The exact model ID is claude-opus-4-6[1m].
+ - You are powered by the model named Opus 4.6 (1M context). The exact model ID is claude-opus-4-6[1m].
  - Assistant knowledge cutoff is May 2025.
  - The most recent Claude model family is Claude 4.6 and 4.5. Model IDs — Opus 4.6: 'claude-opus-4-6', Sonnet 4.6: 'claude-sonnet-4-6', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.
  - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).
