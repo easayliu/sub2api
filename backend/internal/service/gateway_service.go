@@ -6788,7 +6788,8 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		// order observed in CLI 2.1.133 captures.
 		incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
 		requiredBetas := claude.OAuthMessagesRequiredBetas(modelID)
-		setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
+		canonicalBetas := claude.OAuthBetaCanonicalOrder(modelID)
+		setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet, canonicalBetas))
 	} else {
 		// API-key accounts: apply beta policy filter to strip controlled tokens
 		if existingBeta := getHeaderRaw(req.Header, "anthropic-beta"); existingBeta != "" {
@@ -6965,9 +6966,9 @@ func ensureOAuthBeta(header string) string {
 	return strings.Join(out, ",")
 }
 
-func mergeAnthropicBetaDropping(required []string, incoming string, drop map[string]struct{}) string {
+func mergeAnthropicBetaDropping(required []string, incoming string, drop map[string]struct{}, canonical []string) string {
 	merged := mergeAnthropicBeta(required, incoming)
-	if merged == "" || len(drop) == 0 {
+	if merged == "" {
 		return merged
 	}
 	out := make([]string, 0, 8)
@@ -6981,7 +6982,41 @@ func mergeAnthropicBetaDropping(required []string, incoming string, drop map[str
 		}
 		out = append(out, p)
 	}
+	out = reorderBetasByCanonical(out, canonical)
 	return strings.Join(out, ",")
+}
+
+// reorderBetasByCanonical re-sorts tokens to match a canonical wire order:
+// tokens that appear in canonical are emitted first in canonical sequence, then
+// any remaining tokens (unknown to canonical) are appended in their original
+// order. A nil/empty canonical list returns tokens unchanged, so tiers without a
+// verified wire order keep plain merge ordering. mergeAnthropicBeta already
+// de-duplicates, so tokens is assumed unique.
+func reorderBetasByCanonical(tokens []string, canonical []string) []string {
+	if len(canonical) == 0 || len(tokens) == 0 {
+		return tokens
+	}
+	present := make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		present[t] = struct{}{}
+	}
+	out := make([]string, 0, len(tokens))
+	placed := make(map[string]struct{}, len(tokens))
+	for _, c := range canonical {
+		if _, ok := present[c]; ok {
+			if _, done := placed[c]; !done {
+				out = append(out, c)
+				placed[c] = struct{}{}
+			}
+		}
+	}
+	for _, t := range tokens {
+		if _, done := placed[t]; !done {
+			out = append(out, t)
+			placed[t] = struct{}{}
+		}
+	}
+	return out
 }
 
 // stripBetaTokens removes the given beta tokens from a comma-separated header value.
@@ -9763,7 +9798,8 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
 			requiredBetas := []string{claude.BetaClaudeCode, claude.BetaOAuth, claude.BetaInterleavedThinking, claude.BetaTokenCounting}
-			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, ctEffectiveDropSet))
+			// count_tokens uses its own fixed token set (no /v1/messages canonical order).
+			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, ctEffectiveDropSet, nil))
 		} else {
 			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
 			if clientBetaHeader == "" {

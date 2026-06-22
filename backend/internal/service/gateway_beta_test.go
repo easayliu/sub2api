@@ -106,7 +106,7 @@ func TestMergeAnthropicBetaDropping_Context1M(t *testing.T) {
 	incoming := "context-1m-2025-08-07,foo-beta,oauth-2025-04-20"
 	drop := map[string]struct{}{"context-1m-2025-08-07": {}}
 
-	got := mergeAnthropicBetaDropping(required, incoming, drop)
+	got := mergeAnthropicBetaDropping(required, incoming, drop, nil)
 	require.Equal(t, "oauth-2025-04-20,interleaved-thinking-2025-05-14,foo-beta", got)
 	require.NotContains(t, got, "context-1m-2025-08-07")
 }
@@ -118,10 +118,49 @@ func TestMergeAnthropicBetaDropping_DroppedBetas(t *testing.T) {
 	// Without a policy filter set, nothing gets dropped from the static set.
 	drop := droppedBetaSet()
 
-	got := mergeAnthropicBetaDropping(required, incoming, drop)
+	got := mergeAnthropicBetaDropping(required, incoming, drop, nil)
 	require.Equal(t, "oauth-2025-04-20,interleaved-thinking-2025-05-14,context-1m-2025-08-07,fast-mode-2026-02-01,foo-beta", got)
 	require.Contains(t, got, "context-1m-2025-08-07")
 	require.Contains(t, got, "fast-mode-2026-02-01")
+}
+
+// TestMergeAnthropicBetaDropping_OpusCanonicalOrder pins the CLI 2.1.185 opus
+// fix: when the client supplies the conditional thinking-token-count and
+// mid-conversation-system tokens, the merged set must match the genuine wire
+// order (capture/2.1.185/005) rather than tail-appending them after the
+// injected OAuth tokens.
+func TestMergeAnthropicBetaDropping_OpusCanonicalOrder(t *testing.T) {
+	required := claude.OAuthMessagesRequiredBetas("claude-opus-4-8")
+	canonical := claude.OAuthBetaCanonicalOrder("claude-opus-4-8")
+	// Inbound api-key opus traffic (capture/2.1.185/012): no oauth/atu/ect, but
+	// carries the two conditional tokens mid-list.
+	incoming := "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14," +
+		"redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27," +
+		"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24"
+
+	got := mergeAnthropicBetaDropping(required, incoming, nil, canonical)
+
+	want := "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07," +
+		"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13," +
+		"context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+		"advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11"
+	require.Equal(t, want, got)
+}
+
+// TestMergeAnthropicBetaDropping_OpusNoConditionalTokens verifies the order is
+// already correct (and unchanged) when the conditional tokens are absent.
+func TestMergeAnthropicBetaDropping_OpusNoConditionalTokens(t *testing.T) {
+	required := claude.OAuthMessagesRequiredBetas("claude-opus-4-8")
+	canonical := claude.OAuthBetaCanonicalOrder("claude-opus-4-8")
+	incoming := "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14," +
+		"redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24"
+
+	got := mergeAnthropicBetaDropping(required, incoming, nil, canonical)
+
+	want := "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07," +
+		"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27," +
+		"prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11"
+	require.Equal(t, want, got)
 }
 
 func TestDroppedBetaSet(t *testing.T) {

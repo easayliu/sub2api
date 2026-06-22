@@ -30,6 +30,15 @@ const (
 	// injected to avoid an OAuth-without-extended-cache-ttl fingerprint
 	// mismatch. Verified in capture/0508 003/012/019.
 	BetaExtendedCacheTTL = "extended-cache-ttl-2025-04-11"
+	// Claude CLI 2.1.185 opus tokens observed in capture/2.1.185/005 (OAuth) and
+	// inbound api-key traffic alike. Both are CONDITIONAL — thinking-token-count
+	// rides with thinking enabled, mid-conversation-system rides with a
+	// mid-conversation system message — so they are NOT force-injected into the
+	// required set; the client already emits them when applicable. They appear in
+	// OAuthBetaCanonicalOrder so that, when present, they land in the genuine wire
+	// position instead of being appended at the tail.
+	BetaThinkingTokenCount    = "thinking-token-count-2026-05-13"
+	BetaMidConversationSystem = "mid-conversation-system-2026-04-07"
 )
 
 // DroppedBetas 是转发时需要从 anthropic-beta header 中移除的 beta token 列表。
@@ -254,5 +263,44 @@ func OAuthMessagesRequiredBetas(modelID string) []string {
 			BetaEffort,
 			BetaExtendedCacheTTL,
 		}
+	}
+}
+
+// OAuthBetaCanonicalOrder returns the full anthropic-beta wire order a genuine
+// Claude Code CLI 2.1.185 emits for /v1/messages in OAuth mode, INCLUDING the
+// conditional tokens (thinking-token-count, mid-conversation-system). It is used
+// only to re-order the merged token set so the tokens that are present match the
+// upstream fingerprint; it does NOT force any token to be injected.
+//
+// Background: mergeAnthropicBeta appends client-supplied tokens the required set
+// doesn't know about to the tail. For CLI 2.1.133 that was fine, but 2.1.185 opus
+// interleaves thinking-token-count (after redact-thinking) and
+// mid-conversation-system (after prompt-caching-scope) mid-list. Tail-appending
+// them produces the right SET but the wrong ORDER, and the order is itself part
+// of the fingerprint. Reordering by this list fixes that.
+//
+// Only opus is verified (capture/2.1.185/005). Sonnet/haiku return nil until
+// their own 2.1.185 captures pin the wire position of the two new conditional
+// tokens; callers fall back to plain merge order for those tiers.
+func OAuthBetaCanonicalOrder(modelID string) []string {
+	m := strings.ToLower(modelID)
+	switch {
+	case strings.Contains(m, "opus"):
+		return []string{
+			BetaClaudeCode,
+			BetaOAuth,
+			BetaContext1M,
+			BetaInterleavedThinking,
+			BetaRedactThinking,
+			BetaThinkingTokenCount,
+			BetaContextManagement,
+			BetaPromptCachingScope,
+			BetaMidConversationSystem,
+			BetaAdvancedToolUse,
+			BetaEffort,
+			BetaExtendedCacheTTL,
+		}
+	default:
+		return nil
 	}
 }
